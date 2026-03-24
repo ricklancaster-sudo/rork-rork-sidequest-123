@@ -744,8 +744,7 @@ function crispMat(mat) {
 }
 
 const clock = new THREE.Clock();
-let baseMixer = null;
-let clothingMixer = null;
+let mixer = null;
 let model = null;
 let raf = 0;
 
@@ -777,15 +776,9 @@ function findMesh(index, name) {
     const keys = Object.keys(index);
     const lower = name.toLowerCase();
     const match = keys.find(k => k.toLowerCase() === lower);
-    if (match) {
-        console.log('[modular] fuzzy matched: ' + name + ' -> ' + match);
-        return index[match];
-    }
+    if (match) return index[match];
     const partial = keys.find(k => k.toLowerCase().includes(lower) || lower.includes(k.toLowerCase()));
-    if (partial) {
-        console.log('[modular] partial matched: ' + name + ' -> ' + partial);
-        return index[partial];
-    }
+    if (partial) return index[partial];
     return null;
 }
 
@@ -803,7 +796,7 @@ window._equip = function(slot) {
         if (m) m.visible = false;
     });
     equippedState[slot] = true;
-    console.log('[modular] equipped ' + slot + ': found=' + found + ' missing=' + JSON.stringify(missing));
+    console.log('[modular] equipped ' + slot + ': found=' + found + '/' + def.meshes.length + ' missing=' + JSON.stringify(missing));
     notify({state:'slotChanged', slot:slot, equipped:true, found:found, missing:missing});
 };
 
@@ -972,8 +965,7 @@ function tick() {
     if (_paused) return;
     raf = requestAnimationFrame(tick);
     const dt = clock.getDelta();
-    if (baseMixer) baseMixer.update(dt);
-    if (clothingMixer) clothingMixer.update(dt);
+    if (mixer) mixer.update(dt);
     ctrl.update();
     renderer.render(scene, camera);
 }
@@ -1010,6 +1002,33 @@ function setupMaterials(s) {
     });
 }
 
+function rebindToSkeleton(skinnedMesh, targetSkeleton) {
+    var srcBones = skinnedMesh.skeleton.bones;
+    var mapped = [];
+    var matchCount = 0;
+    for (var i = 0; i < srcBones.length; i++) {
+        var srcName = srcBones[i].name;
+        var target = null;
+        for (var j = 0; j < targetSkeleton.bones.length; j++) {
+            if (targetSkeleton.bones[j].name === srcName) {
+                target = targetSkeleton.bones[j];
+                break;
+            }
+        }
+        if (target) {
+            mapped.push(target);
+            matchCount++;
+        } else {
+            mapped.push(srcBones[i]);
+            console.warn('[modular] bone not in base skeleton:', srcName);
+        }
+    }
+    var bindMat = skinnedMesh.bindMatrix.clone();
+    var newSkel = new THREE.Skeleton(mapped);
+    skinnedMesh.bind(newSkel, bindMat);
+    console.log('[modular] rebound ' + skinnedMesh.name + ': ' + matchCount + '/' + srcBones.length + ' bones matched');
+}
+
 Promise.all([
     new Promise((res, rej) => loader.load(baseURL, res, undefined, rej)),
     new Promise((res, rej) => loader.load(clothingURL, res, undefined, rej))
@@ -1018,44 +1037,68 @@ Promise.all([
     const clothingScene = clothingGltf.scene;
 
     baseScene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
-    clothingScene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
 
     setupMaterials(baseScene);
     setupMaterials(clothingScene);
 
     baseScene.traverse(n => { if (n.isMesh) baseIndex[n.name] = n; });
-    clothingScene.traverse(n => { if (n.isMesh) clothingIndex[n.name] = n; });
 
     console.log('[modular] base meshes:', Object.keys(baseIndex));
-    console.log('[modular] clothing meshes:', Object.keys(clothingIndex));
 
-    let baseAnimCount = 0, clothAnimCount = 0;
-    baseScene.traverse(n => { if (n.isBone) baseAnimCount++; });
-    clothingScene.traverse(n => { if (n.isBone) clothAnimCount++; });
-    console.log('[modular] base bones:', baseAnimCount, 'clothing bones:', clothAnimCount);
-    console.log('[modular] base animations:', baseGltf.animations.length, 'clothing animations:', clothingGltf.animations.length);
+    var baseSkeleton = null;
+    baseScene.traverse(n => {
+        if (n.isSkinnedMesh && !baseSkeleton) {
+            baseSkeleton = n.skeleton;
+        }
+    });
+
+    if (baseSkeleton) {
+        console.log('[modular] base skeleton bones:', baseSkeleton.bones.length, baseSkeleton.bones.map(b => b.name));
+    } else {
+        console.warn('[modular] no skeleton found in base body');
+    }
+
+    var clothingSkinned = [];
+    clothingScene.traverse(n => {
+        if (n.isMesh) {
+            clothingIndex[n.name] = n;
+        }
+        if (n.isSkinnedMesh) {
+            clothingSkinned.push(n);
+        }
+    });
+
+    console.log('[modular] clothing meshes:', Object.keys(clothingIndex));
+    console.log('[modular] clothing skinned meshes:', clothingSkinned.map(m => m.name));
+
+    if (baseSkeleton && clothingSkinned.length > 0) {
+        clothingSkinned.forEach(mesh => {
+            rebindToSkeleton(mesh, baseSkeleton);
+        });
+
+        var clothingNodes = [];
+        clothingScene.traverse(n => { clothingNodes.push(n); });
+        clothingNodes.forEach(n => {
+            if (n.isMesh) {
+                n.removeFromParent();
+                baseScene.add(n);
+            }
+        });
+        console.log('[modular] moved clothing meshes into base scene, skeleton shared');
+    } else {
+        console.log('[modular] fallback: adding clothing scene as sibling (no skeleton sharing)');
+        clothingScene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
+        baseScene.add(clothingScene);
+    }
 
     Object.values(clothingIndex).forEach(m => { m.visible = false; });
 
-    const container = new THREE.Group();
-    container.add(baseScene);
-    container.add(clothingScene);
-    scene.add(container);
-    model = container;
-    layout(container);
+    scene.add(baseScene);
+    model = baseScene;
+    layout(baseScene);
 
-    if (baseGltf.animations.length > 0) {
-        baseMixer = new THREE.AnimationMixer(baseScene);
-        baseGltf.animations.forEach(clip => {
-            baseMixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
-        });
-    }
-    if (clothingGltf.animations.length > 0) {
-        clothingMixer = new THREE.AnimationMixer(clothingScene);
-        clothingGltf.animations.forEach(clip => {
-            clothingMixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
-        });
-    }
+    console.log('[modular] base animations:', baseGltf.animations.map(c => c.name + ' (' + c.duration.toFixed(2) + 's)'));
+    console.log('[modular] clothing animations:', clothingGltf.animations.map(c => c.name + ' (' + c.duration.toFixed(2) + 's)'));
 
     initEquip.forEach(slot => window._equip(slot));
 
