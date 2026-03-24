@@ -27,10 +27,8 @@ final class CharacterPreviewSchemeHandler: NSObject, WKURLSchemeHandler {
 
             let responseData: (mimeType: String, data: Data)
             switch url.path {
-            case "/index.html":
-                responseData = ("text/html", Data(Self.previewHTML.utf8))
-            case "/modular.html":
-                responseData = ("text/html", Data(Self.modularPreviewHTML.utf8))
+            case "/index.html", "/modular.html":
+                responseData = ("text/html", Data(Self.unifiedPreviewHTML.utf8))
             case let path where path.hasPrefix("/models/"):
                 let fileName: String = url.deletingPathExtension().lastPathComponent
                 let model = try Self.cachedModel(named: fileName)
@@ -101,450 +99,9 @@ final class CharacterPreviewSchemeHandler: NSObject, WKURLSchemeHandler {
         }
     }
 
-    private static let previewHTML: String = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
-<style>
-html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
-canvas{display:block;width:100%;height:100%;touch-action:none;outline:none}
-</style>
-</head>
-<body>
-<canvas id="c"></canvas>
-<script>
-window._dbg = function(){};
-</script>
-<script type="module">
-import { THREE, OrbitControls, GLTFLoader } from './preview-deps.bundle.js';
+    // MARK: - Unified Preview HTML
 
-const P = new URL(location.href);
-const modelName = P.searchParams.get('model') || 'Gunslinger';
-const allowsControl = P.searchParams.get('controls') === '1';
-const autoRotate = P.searchParams.get('rotate') === '1';
-const framing = P.searchParams.get('framing') || 'fullBody';
-const yawDeg = parseFloat(P.searchParams.get('yaw') || '0');
-const sceneStyle = P.searchParams.get('sceneStyle') || 'standard';
-const isHero = sceneStyle === 'heroProfile' || sceneStyle === 'homeHero';
-const isHomeHero = sceneStyle === 'homeHero';
-
-const notify = v => { try { window.webkit.messageHandlers.previewState.postMessage(v); } catch(e){} };
-notify({state:'init', model:modelName, hero:isHero});
-
-const canvas = document.getElementById('c');
-const renderer = new THREE.WebGLRenderer({
-    canvas,
-    alpha: true,
-    antialias: true,
-    logarithmicDepthBuffer: true,
-    powerPreference: 'high-performance'
-});
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.setClearColor(0x000000, 0);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = isHero ? 0.98 : 1.1;
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.VSMShadowMap;
-renderer.physicallyCorrectLights = true;
-
-const scene = new THREE.Scene();
-const fov = isHero ? 32 : 30;
-const camera = new THREE.PerspectiveCamera(fov, 1, 0.01, 100);
-
-const ctrl = new OrbitControls(camera, canvas);
-ctrl.enableDamping = true;
-ctrl.dampingFactor = 0.08;
-ctrl.enablePan = false;
-ctrl.enableZoom = false;
-ctrl.enableRotate = allowsControl && !isHero;
-ctrl.autoRotate = autoRotate;
-ctrl.autoRotateSpeed = 1.2;
-ctrl.minPolarAngle = Math.PI * 0.35;
-ctrl.maxPolarAngle = Math.PI * 0.6;
-
-if (isHero) {
-    const ambient = new THREE.AmbientLight(0x404048, 0.18);
-    scene.add(ambient);
-
-    const hemi = new THREE.HemisphereLight(0x586070, 0x0a0c10, 0.14);
-    hemi.position.set(0, 1, 0);
-    scene.add(hemi);
-} else {
-    const ambient = new THREE.AmbientLight(0x606070, 0.45);
-    scene.add(ambient);
-
-    const hemi = new THREE.HemisphereLight(0x8090b0, 0x0c0e14, 0.5);
-    hemi.position.set(0, 1, 0);
-    scene.add(hemi);
-}
-
-const sun = new THREE.DirectionalLight(
-    isHero ? 0xfff2e0 : 0xffeedd,
-    isHero ? 3.2 : 2.8
-);
-sun.castShadow = true;
-sun.shadow.mapSize.set(isHero ? 4096 : 2048, isHero ? 4096 : 2048);
-if (isHero) {
-    sun.shadow.bias = -0.00025;
-    sun.shadow.normalBias = 0.025;
-    sun.shadow.radius = 8;
-    sun.shadow.blurSamples = 24;
-} else {
-    sun.shadow.bias = -0.0002;
-    sun.shadow.normalBias = 0.012;
-    sun.shadow.radius = 5;
-    sun.shadow.blurSamples = 16;
-}
-scene.add(sun);
-scene.add(sun.target);
-
-const fill = new THREE.DirectionalLight(
-    isHero ? 0xa0b4d0 : 0xb0c8e8,
-    isHero ? 0.55 : 0.9
-);
-fill.castShadow = false;
-scene.add(fill);
-scene.add(fill.target);
-
-const rim = new THREE.DirectionalLight(
-    isHero ? 0xb8c4e0 : 0xd0d8ff,
-    isHero ? 0.40 : 1.5
-);
-rim.castShadow = false;
-scene.add(rim);
-scene.add(rim.target);
-
-let bounce = null;
-let footLift = null;
-if (isHero) {
-    bounce = new THREE.PointLight(0xffe8c8, 0.28, 0, 2);
-    scene.add(bounce);
-    footLift = new THREE.SpotLight(0xffddb8, 0.7, 0, 0.9, 1.0, 2);
-    footLift.castShadow = false;
-    scene.add(footLift);
-    scene.add(footLift.target);
-}
-
-let floorMesh, contactMesh = null, castShadowMesh = null;
-if (isHero) {
-    const floorGeo = new THREE.CircleGeometry(80, 96);
-    const floorMat = new THREE.ShadowMaterial({ opacity: 0.30 });
-    floorMesh = new THREE.Mesh(floorGeo, floorMat);
-    floorMesh.rotation.x = -Math.PI / 2;
-    floorMesh.position.y = 0;
-    floorMesh.receiveShadow = true;
-    scene.add(floorMesh);
-
-    const cSize = 256;
-    const cCanvas = document.createElement('canvas');
-    cCanvas.width = cSize; cCanvas.height = cSize;
-    const cCtx = cCanvas.getContext('2d');
-    const cGrad = cCtx.createRadialGradient(cSize/2, cSize/2, 0, cSize/2, cSize/2, cSize/2);
-    cGrad.addColorStop(0, 'rgba(0,0,0,0.22)');
-    cGrad.addColorStop(0.30, 'rgba(0,0,0,0.14)');
-    cGrad.addColorStop(0.65, 'rgba(0,0,0,0.04)');
-    cGrad.addColorStop(1, 'rgba(0,0,0,0)');
-    cCtx.fillStyle = cGrad;
-    cCtx.fillRect(0, 0, cSize, cSize);
-    const contactTex = new THREE.CanvasTexture(cCanvas);
-    const contactGeo = new THREE.PlaneGeometry(1, 1);
-    const contactMat = new THREE.MeshBasicMaterial({
-        map: contactTex,
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.NormalBlending
-    });
-    contactMesh = new THREE.Mesh(contactGeo, contactMat);
-    contactMesh.rotation.x = -Math.PI / 2;
-    contactMesh.position.y = 0.002;
-    scene.add(contactMesh);
-
-    const csSize = 256;
-    const csCanvas = document.createElement('canvas');
-    csCanvas.width = csSize; csCanvas.height = csSize;
-    const csCtx = csCanvas.getContext('2d');
-    const csGrad = csCtx.createRadialGradient(csSize*0.38, csSize*0.4, 0, csSize*0.45, csSize*0.45, csSize*0.5);
-    csGrad.addColorStop(0, 'rgba(0,0,0,0.16)');
-    csGrad.addColorStop(0.30, 'rgba(0,0,0,0.09)');
-    csGrad.addColorStop(0.65, 'rgba(0,0,0,0.02)');
-    csGrad.addColorStop(1, 'rgba(0,0,0,0)');
-    csCtx.fillStyle = csGrad;
-    csCtx.fillRect(0, 0, csSize, csSize);
-    const castTex = new THREE.CanvasTexture(csCanvas);
-    const castGeo = new THREE.PlaneGeometry(1, 1);
-    const castMat = new THREE.MeshBasicMaterial({
-        map: castTex,
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.NormalBlending
-    });
-    castShadowMesh = new THREE.Mesh(castGeo, castMat);
-    castShadowMesh.rotation.x = -Math.PI / 2;
-    castShadowMesh.position.y = 0.001;
-    scene.add(castShadowMesh);
-} else {
-    const floorGeo = new THREE.PlaneGeometry(1200, 1200);
-    const floorMat = new THREE.ShadowMaterial({ opacity: 0.45 });
-    floorMesh = new THREE.Mesh(floorGeo, floorMat);
-    floorMesh.rotation.x = -Math.PI / 2;
-    floorMesh.position.y = 0;
-    floorMesh.receiveShadow = true;
-    scene.add(floorMesh);
-}
-
-const texSlots = ['map','alphaMap','aoMap','bumpMap','emissiveMap','metalnessMap','normalMap','roughnessMap'];
-const seen = new WeakSet();
-function crispTex(tex) {
-    if (!tex || seen.has(tex)) return;
-    tex.generateMipmaps = false;
-    tex.minFilter = THREE.NearestFilter;
-    tex.magFilter = THREE.NearestFilter;
-    tex.anisotropy = 1;
-    tex.needsUpdate = true;
-    seen.add(tex);
-}
-function crispMat(mat) {
-    if (!mat) return;
-    texSlots.forEach(s => crispTex(mat[s]));
-    mat.needsUpdate = true;
-}
-
-const clock = new THREE.Clock();
-let mixer = null;
-let model = null;
-let raf = 0;
-
-function layout(m) {
-    m.updateWorldMatrix(true, true);
-    const b = new THREE.Box3().setFromObject(m);
-    const c = b.getCenter(new THREE.Vector3());
-    m.position.x -= c.x;
-    m.position.y -= b.min.y;
-    m.position.z -= c.z;
-    m.updateWorldMatrix(true, true);
-
-    const b2 = new THREE.Box3().setFromObject(m);
-    const s = b2.getSize(new THREE.Vector3());
-    const h = s.y || 1, w = s.x || 1, d = s.z || 1;
-    const asp = Math.max(canvas.clientWidth,1) / Math.max(canvas.clientHeight,1);
-    const hfov = THREE.MathUtils.degToRad(fov) * 0.5;
-
-    if (isHero) {
-        if (isHomeHero) {
-            sun.position.set(w * 2.8, h * 3.2, d * 2.2);
-            sun.target.position.set(0, h * 0.38, 0);
-
-            fill.position.set(-w * 0.4, h * 0.85, d * 3.5);
-            fill.target.position.set(0, h * 0.36, 0);
-
-            rim.position.set(-w * 2.4, h * 2.2, -d * 2.0);
-            rim.target.position.set(0, h * 0.44, 0);
-        } else {
-            sun.position.set(-w * 2.8, h * 3.2, d * 2.2);
-            sun.target.position.set(0, h * 0.38, 0);
-
-            fill.position.set(w * 0.4, h * 0.85, d * 3.5);
-            fill.target.position.set(0, h * 0.36, 0);
-
-            rim.position.set(w * 2.4, h * 2.2, -d * 2.0);
-            rim.target.position.set(0, h * 0.44, 0);
-        }
-
-        if (bounce) {
-            bounce.position.set(0, h * 0.10, d * 1.2);
-        }
-        if (footLift) {
-            footLift.position.set(0, h * 0.30, d * 1.8);
-            footLift.target.position.set(0, h * 0.03, 0);
-        }
-
-        const sc = sun.shadow.camera;
-        const sw = Math.max(w, d) * 2.0;
-        sc.left = isHomeHero ? -sw * 2.8 : -sw * 1.5;
-        sc.right = isHomeHero ? sw * 1.5 : sw * 2.8;
-        sc.bottom = -sw * 1.5;
-        sc.top = h * 1.5;
-        sc.near = 0.1;
-        sc.far = h * 10;
-        sc.updateProjectionMatrix();
-
-        if (contactMesh) {
-            const footW = w * 1.2;
-            const footD = d * 1.4;
-            contactMesh.scale.set(footW, footD, 1);
-            contactMesh.position.set(0, 0.002, d * 0.05);
-        }
-        if (castShadowMesh) {
-            const csW = w * 3.5;
-            const csD = d * 4.0;
-            castShadowMesh.scale.set(csW, csD, 1);
-            castShadowMesh.position.set(isHomeHero ? -w * 0.6 : w * 0.6, 0.001, -d * 0.8);
-        }
-    } else {
-        sun.position.set(-w * 5.0, h * 1.8, d * 3.0);
-        sun.target.position.set(0, h * 0.25, 0);
-
-        fill.position.set(w * 2.5, h * 1.2, d * 2.0);
-        fill.target.position.set(0, h * 0.4, 0);
-
-        rim.position.set(w * 2.0, h * 2.0, -d * 2.5);
-        rim.target.position.set(0, h * 0.5, 0);
-
-        const sc = sun.shadow.camera;
-        const shadowSpan = Math.max(w, d) * 12.0;
-        sc.left = -shadowSpan; sc.right = shadowSpan * 2.0;
-        sc.bottom = -shadowSpan * 4.0; sc.top = h * 2.5;
-        sc.near = 0.1; sc.far = h * 16;
-        sc.updateProjectionMatrix();
-    }
-
-    if (framing === 'headshot') {
-        const ph = h * 0.42;
-        const dist = (ph * 0.55) / Math.tan(hfov);
-        const tY = h * 0.78;
-        camera.aspect = asp;
-        camera.near = 0.01; camera.far = dist * 10;
-        camera.updateProjectionMatrix();
-        camera.position.set(dist * 0.12, tY, dist * 0.95);
-        ctrl.target.set(0, tY, 0);
-        ctrl.update();
-        return;
-    }
-
-    if (framing === 'upperBody') {
-        const ph = h * 0.68;
-        const dist = (ph * 0.55) / Math.tan(hfov);
-        const tY = h * 0.60;
-        camera.aspect = asp;
-        camera.near = 0.01; camera.far = dist * 10;
-        camera.updateProjectionMatrix();
-        camera.position.set(dist * 0.03, tY - h * 0.015, dist * 0.98);
-        ctrl.target.set(0, tY, 0);
-        ctrl.update();
-        return;
-    }
-
-    if (framing === 'portrait') {
-        const ph = h * 0.75;
-        const dist = (ph * 0.55) / Math.tan(hfov);
-        const tY = h * 0.52;
-        camera.aspect = asp;
-        camera.near = 0.01; camera.far = dist * 10;
-        camera.updateProjectionMatrix();
-        camera.position.set(dist * 0.08, tY, dist * 0.95);
-        ctrl.target.set(0, tY, 0);
-        ctrl.update();
-        return;
-    }
-
-    if (isHero) {
-        const padH = h * 1.45;
-        const padW = w * 1.1;
-        const visW = padH * asp;
-        const fH = padW > visW ? padW / asp : padH;
-        const dist = (fH * 0.5) / Math.tan(hfov);
-        const tY = h * 0.38;
-        camera.aspect = asp;
-        camera.near = 0.01; camera.far = dist * 10;
-        camera.updateProjectionMatrix();
-        camera.position.set(0, tY + h * 0.44, dist);
-        ctrl.target.set(0, tY, 0);
-        ctrl.update();
-    } else {
-        const padH = h * 1.4;
-        const padW = w * 1.1;
-        const visW = padH * asp;
-        const fH = padW > visW ? padW / asp : padH;
-        const dist = (fH * 0.5) / Math.tan(hfov);
-        const tY = h * 0.48;
-        camera.aspect = asp;
-        camera.near = 0.01; camera.far = dist * 10;
-        camera.updateProjectionMatrix();
-        camera.position.set(0, tY + h * 0.28, dist);
-        ctrl.target.set(0, tY - h * 0.02, 0);
-        ctrl.update();
-    }
-}
-
-function resize() {
-    const w = Math.max(canvas.clientWidth, 1);
-    const h = Math.max(canvas.clientHeight, 1);
-    renderer.setSize(w, h, false);
-    if (model) layout(model);
-}
-
-var _paused = false;
-function tick() {
-    if (_paused) return;
-    raf = requestAnimationFrame(tick);
-    const dt = clock.getDelta();
-    if (mixer) mixer.update(dt);
-    ctrl.update();
-    renderer.render(scene, camera);
-}
-window._pause = function() {
-    _paused = true;
-    cancelAnimationFrame(raf);
-};
-window._resume = function() {
-    if (!_paused) return;
-    _paused = false;
-    clock.getDelta();
-    tick();
-};
-
-resize();
-window.addEventListener('resize', resize);
-
-const baseOrigin = P.origin + (P.pathname.includes('/') ? P.pathname.substring(0, P.pathname.lastIndexOf('/')) : '');
-const modelURL = baseOrigin + '/models/' + encodeURIComponent(modelName) + '.glb';
-new GLTFLoader().load(modelURL, gltf => {
-    model = gltf.scene;
-    model.rotation.y = THREE.MathUtils.degToRad(yawDeg);
-    model.traverse(n => {
-        if (!n.isMesh) return;
-        n.frustumCulled = false;
-        n.castShadow = true;
-        n.receiveShadow = false;
-        const mats = Array.isArray(n.material) ? n.material : [n.material];
-        mats.forEach(m => {
-            crispMat(m);
-            if (m) {
-                m.polygonOffset = true;
-                m.polygonOffsetFactor = 1;
-                m.polygonOffsetUnits = 1;
-            }
-        });
-    });
-    scene.add(model);
-    layout(model);
-
-    if (gltf.animations.length > 0) {
-        mixer = new THREE.AnimationMixer(model);
-        gltf.animations.forEach(clip => {
-            const a = mixer.clipAction(clip);
-            a.setLoop(THREE.LoopRepeat, Infinity);
-            a.play();
-        });
-    }
-
-    tick();
-
-    requestAnimationFrame(() => { notify('ready'); });
-}, undefined, err => {
-    notify({state:'loadError', error: String(err)});
-});
-
-window.addEventListener('pagehide', () => { window._pause(); ctrl.dispose(); });
-</script>
-</body>
-</html>
-"""
-
-    private static let modularPreviewHTML: String = """
+    private static let unifiedPreviewHTML: String = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -562,17 +119,25 @@ canvas{display:block;width:100%;height:100%;touch-action:none;outline:none}
 import { THREE, OrbitControls, GLTFLoader } from './preview-deps.bundle.js';
 
 const P = new URL(location.href);
+const mode = P.searchParams.get('mode') || 'single';
+const modelName = P.searchParams.get('model') || 'Gunslinger';
+const baseModelName = P.searchParams.get('baseModel') || 'WhiteMale';
 const allowsControl = P.searchParams.get('controls') === '1';
 const autoRotate = P.searchParams.get('rotate') === '1';
 const framing = P.searchParams.get('framing') || 'fullBody';
 const yawDeg = parseFloat(P.searchParams.get('yaw') || '0');
-const sceneStyle = P.searchParams.get('sceneStyle') || 'heroProfile';
+const sceneStyle = P.searchParams.get('sceneStyle') || 'standard';
 const isHero = sceneStyle === 'heroProfile' || sceneStyle === 'homeHero';
 const isHomeHero = sceneStyle === 'homeHero';
-const initEquip = (P.searchParams.get('equip') || '').split(',').filter(Boolean);
+
+var initConfig = {};
+try {
+    var raw = P.searchParams.get('config');
+    if (raw) initConfig = JSON.parse(decodeURIComponent(raw));
+} catch(e) { console.warn('[preview] bad config param', e); }
 
 const notify = v => { try { window.webkit.messageHandlers.previewState.postMessage(v); } catch(e){} };
-notify({state:'init', mode:'modular'});
+notify({state:'init', mode:mode});
 
 const canvas = document.getElementById('c');
 const renderer = new THREE.WebGLRenderer({
@@ -742,79 +307,24 @@ function crispMat(mat) {
     texSlots.forEach(s => crispTex(mat[s]));
     mat.needsUpdate = true;
 }
+function setupMaterials(s) {
+    s.traverse(n => {
+        if (!n.isMesh) return;
+        n.frustumCulled = false;
+        n.castShadow = true;
+        n.receiveShadow = false;
+        const mats = Array.isArray(n.material) ? n.material : [n.material];
+        mats.forEach(m => {
+            crispMat(m);
+            if (m) { m.polygonOffset = true; m.polygonOffsetFactor = 1; m.polygonOffsetUnits = 1; }
+        });
+    });
+}
 
 const clock = new THREE.Clock();
 let mixer = null;
 let model = null;
 let raf = 0;
-
-const baseIndex = {};
-const clothingIndex = {};
-const equippedState = {};
-
-const SLOTS = {
-    top: {
-        meshes: ['Belly-Mesh','Chest_A-Mesh','LeftArm-Mesh','LeftForearm-Mesh','LeftHand-Mesh','RightArm-Mesh','RightForearm-Mesh','RightHand-Mesh','Scarf-Mesh'],
-        hide: ['Belly1-Mesh','Chest_A1-Mesh','LeftArm1-Mesh','LeftForearm1-Mesh','LeftHand1-Mesh','RightArm1-Mesh','RightForearm1-Mesh','RightHand1-Mesh']
-    },
-    bottom: {
-        meshes: ['Hip-Mesh','LeftThigh-Mesh','LeftLeg-Mesh','RightThigh-Mesh','RightLeg-Mesh'],
-        hide: ['Hip1-Mesh','LeftThigh1-Mesh','LeftLeg1-Mesh','RightThigh1-Mesh','RightLeg1-Mesh']
-    },
-    shoes: {
-        meshes: ['LeftFoot-Mesh','RightFoot-Mesh'],
-        hide: ['LeftFoot1-Mesh','RightFoot1-Mesh']
-    },
-    hat: {
-        meshes: ['Hat_A-Mesh'],
-        hide: []
-    }
-};
-
-function findMesh(index, name) {
-    if (index[name]) return index[name];
-    const keys = Object.keys(index);
-    const lower = name.toLowerCase();
-    const match = keys.find(k => k.toLowerCase() === lower);
-    if (match) return index[match];
-    const partial = keys.find(k => k.toLowerCase().includes(lower) || lower.includes(k.toLowerCase()));
-    if (partial) return index[partial];
-    return null;
-}
-
-window._equip = function(slot) {
-    const def = SLOTS[slot];
-    if (!def) { console.warn('[modular] unknown slot:', slot); return; }
-    let found = 0, missing = [];
-    def.meshes.forEach(name => {
-        const m = findMesh(clothingIndex, name);
-        if (m) { m.visible = true; found++; }
-        else { missing.push(name); }
-    });
-    def.hide.forEach(name => {
-        const m = findMesh(baseIndex, name);
-        if (m) m.visible = false;
-    });
-    equippedState[slot] = true;
-    console.log('[modular] equipped ' + slot + ': found=' + found + '/' + def.meshes.length + ' missing=' + JSON.stringify(missing));
-    notify({state:'slotChanged', slot:slot, equipped:true, found:found, missing:missing});
-};
-
-window._unequip = function(slot) {
-    const def = SLOTS[slot];
-    if (!def) { console.warn('[modular] unknown slot:', slot); return; }
-    def.meshes.forEach(name => {
-        const m = findMesh(clothingIndex, name);
-        if (m) m.visible = false;
-    });
-    def.hide.forEach(name => {
-        const m = findMesh(baseIndex, name);
-        if (m) m.visible = true;
-    });
-    equippedState[slot] = false;
-    console.log('[modular] unequipped ' + slot);
-    notify({state:'slotChanged', slot:slot, equipped:false});
-};
 
 function layout(m) {
     m.updateWorldMatrix(true, true);
@@ -984,22 +494,45 @@ resize();
 window.addEventListener('resize', resize);
 
 const baseOrigin = P.origin + (P.pathname.includes('/') ? P.pathname.substring(0, P.pathname.lastIndexOf('/')) : '');
-const baseURL = baseOrigin + '/models/WhiteMale.glb';
-const clothingURL = baseOrigin + '/models/Cowboy.glb';
 const loader = new GLTFLoader();
 
-function setupMaterials(s) {
-    s.traverse(n => {
-        if (!n.isMesh) return;
-        n.frustumCulled = false;
-        n.castShadow = true;
-        n.receiveShadow = false;
-        const mats = Array.isArray(n.material) ? n.material : [n.material];
-        mats.forEach(m => {
-            crispMat(m);
-            if (m) { m.polygonOffset = true; m.polygonOffsetFactor = 1; m.polygonOffsetUnits = 1; }
-        });
+const baseIndex = {};
+const clothingIndices = {};
+let baseSkeleton = null;
+const equippedState = {};
+const lookupNotes = [];
+
+function findMesh(index, name) {
+    if (index[name]) return index[name];
+    const keys = Object.keys(index);
+    const lower = name.toLowerCase();
+    var match = keys.find(k => k.toLowerCase() === lower);
+    if (match) { lookupNotes.push('fuzzy:case:' + name + '->' + match); return index[match]; }
+    match = keys.find(k => k.toLowerCase().includes(lower) || lower.includes(k.toLowerCase()));
+    if (match) { lookupNotes.push('fuzzy:partial:' + name + '->' + match); return index[match]; }
+    const stripped = lower.replace(/[-_]?mesh$/i, '').replace(/\\d+$/, '');
+    match = keys.find(k => {
+        const ks = k.toLowerCase().replace(/[-_]?mesh$/i, '').replace(/\\d+$/, '');
+        return ks === stripped;
     });
+    if (match) { lookupNotes.push('fuzzy:stripped:' + name + '->' + match); return index[match]; }
+    lookupNotes.push('missing:' + name);
+    return null;
+}
+
+function findClothingMesh(sourceFile, name) {
+    const idx = clothingIndices[sourceFile];
+    if (!idx) { lookupNotes.push('missing-source:' + sourceFile + ':' + name); return null; }
+    return findMesh(idx, name);
+}
+
+function findNodeByName(root, name) {
+    var found = null;
+    root.traverse(n => { if (!found && n.name === name) found = n; });
+    if (found) return found;
+    var lower = name.toLowerCase();
+    root.traverse(n => { if (!found && n.name.toLowerCase() === lower) found = n; });
+    return found;
 }
 
 function rebindToSkeleton(skinnedMesh, targetSkeleton) {
@@ -1020,98 +553,196 @@ function rebindToSkeleton(skinnedMesh, targetSkeleton) {
             matchCount++;
         } else {
             mapped.push(srcBones[i]);
-            console.warn('[modular] bone not in base skeleton:', srcName);
+            lookupNotes.push('bone-miss:' + srcName);
         }
     }
     var bindMat = skinnedMesh.bindMatrix.clone();
     var newSkel = new THREE.Skeleton(mapped);
     skinnedMesh.bind(newSkel, bindMat);
-    console.log('[modular] rebound ' + skinnedMesh.name + ': ' + matchCount + '/' + srcBones.length + ' bones matched');
+    console.log('[preview] rebound ' + skinnedMesh.name + ': ' + matchCount + '/' + srcBones.length);
 }
 
-Promise.all([
-    new Promise((res, rej) => loader.load(baseURL, res, undefined, rej)),
-    new Promise((res, rej) => loader.load(clothingURL, res, undefined, rej))
-]).then(([baseGltf, clothingGltf]) => {
-    const baseScene = baseGltf.scene;
-    const clothingScene = clothingGltf.scene;
-
-    baseScene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
-
-    setupMaterials(baseScene);
-    setupMaterials(clothingScene);
-
-    baseScene.traverse(n => { if (n.isMesh) baseIndex[n.name] = n; });
-
-    console.log('[modular] base meshes:', Object.keys(baseIndex));
-
-    var baseSkeleton = null;
-    baseScene.traverse(n => {
-        if (n.isSkinnedMesh && !baseSkeleton) {
-            baseSkeleton = n.skeleton;
-        }
+function applyEquip(slot, config) {
+    var found = 0, missing = [];
+    var sf = config.sourceFile || '';
+    (config.meshNames || []).forEach(function(name) {
+        var m = sf ? findClothingMesh(sf, name) : findMesh(clothingIndices[Object.keys(clothingIndices)[0]] || {}, name);
+        if (m) { m.visible = true; found++; }
+        else { missing.push(name); }
     });
+    (config.hideBaseMeshes || []).forEach(function(name) {
+        var m = findMesh(baseIndex, name);
+        if (m) m.visible = false;
+    });
+    equippedState[slot] = config;
+    console.log('[preview] equip ' + slot + ': ' + found + '/' + (config.meshNames||[]).length + ' missing=' + JSON.stringify(missing));
+    notify({state:'slotChanged', slot:slot, equipped:true, found:found, total:(config.meshNames||[]).length, missing:missing});
+}
 
-    if (baseSkeleton) {
-        console.log('[modular] base skeleton bones:', baseSkeleton.bones.length, baseSkeleton.bones.map(b => b.name));
-    } else {
-        console.warn('[modular] no skeleton found in base body');
+function applyUnequip(slot) {
+    var config = equippedState[slot];
+    if (!config) return;
+    var sf = config.sourceFile || '';
+    (config.meshNames || []).forEach(function(name) {
+        var m = sf ? findClothingMesh(sf, name) : null;
+        if (m) m.visible = false;
+    });
+    (config.hideBaseMeshes || []).forEach(function(name) {
+        var m = findMesh(baseIndex, name);
+        if (m) m.visible = true;
+    });
+    delete equippedState[slot];
+    console.log('[preview] unequip ' + slot);
+    notify({state:'slotChanged', slot:slot, equipped:false});
+}
+
+window._equip = function(slot, configJSON) {
+    var config = typeof configJSON === 'string' ? JSON.parse(configJSON) : configJSON;
+    applyEquip(slot, config);
+};
+
+window._unequip = function(slot) {
+    applyUnequip(slot);
+};
+
+if (mode === 'modular') {
+    var sourceFiles = new Set();
+    for (var sk in initConfig) {
+        if (initConfig[sk] && initConfig[sk].sourceFile) sourceFiles.add(initConfig[sk].sourceFile);
     }
+    var sourceFileList = Array.from(sourceFiles);
+    if (sourceFileList.length === 0) sourceFileList = [];
 
-    var clothingSkinned = [];
-    clothingScene.traverse(n => {
-        if (n.isMesh) {
-            clothingIndex[n.name] = n;
-        }
-        if (n.isSkinnedMesh) {
-            clothingSkinned.push(n);
-        }
+    var loads = [
+        new Promise(function(res, rej) {
+            loader.load(baseOrigin + '/models/' + encodeURIComponent(baseModelName) + '.glb', res, undefined, rej);
+        })
+    ];
+    sourceFileList.forEach(function(sf) {
+        loads.push(new Promise(function(res, rej) {
+            loader.load(baseOrigin + '/models/' + encodeURIComponent(sf) + '.glb', res, undefined, rej);
+        }));
     });
 
-    console.log('[modular] clothing meshes:', Object.keys(clothingIndex));
-    console.log('[modular] clothing skinned meshes:', clothingSkinned.map(m => m.name));
+    Promise.all(loads).then(function(results) {
+        var baseGltf = results[0];
+        var clothingGltfs = results.slice(1);
 
-    if (baseSkeleton && clothingSkinned.length > 0) {
-        clothingSkinned.forEach(mesh => {
-            rebindToSkeleton(mesh, baseSkeleton);
+        var baseScene = baseGltf.scene;
+        baseScene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
+        setupMaterials(baseScene);
+
+        baseScene.traverse(function(n) { if (n.isMesh) baseIndex[n.name] = n; });
+        baseScene.traverse(function(n) {
+            if (n.isSkinnedMesh && !baseSkeleton) baseSkeleton = n.skeleton;
         });
 
-        var clothingNodes = [];
-        clothingScene.traverse(n => { clothingNodes.push(n); });
-        clothingNodes.forEach(n => {
-            if (n.isMesh) {
-                n.removeFromParent();
-                baseScene.add(n);
+        console.log('[preview] base meshes:', Object.keys(baseIndex));
+        if (baseSkeleton) {
+            console.log('[preview] base skeleton bones:', baseSkeleton.bones.length);
+        }
+
+        clothingGltfs.forEach(function(gltf, i) {
+            var sf = sourceFileList[i];
+            clothingIndices[sf] = {};
+            setupMaterials(gltf.scene);
+
+            var skinnedMeshes = [];
+            gltf.scene.traverse(function(n) {
+                if (n.isMesh) clothingIndices[sf][n.name] = n;
+                if (n.isSkinnedMesh) skinnedMeshes.push(n);
+            });
+
+            console.log('[preview] clothing [' + sf + '] meshes:', Object.keys(clothingIndices[sf]));
+
+            if (baseSkeleton && skinnedMeshes.length > 0) {
+                skinnedMeshes.forEach(function(mesh) {
+                    rebindToSkeleton(mesh, baseSkeleton);
+                });
+                var nodes = [];
+                gltf.scene.traverse(function(n) { nodes.push(n); });
+                nodes.forEach(function(n) {
+                    if (n.isMesh) {
+                        n.removeFromParent();
+                        baseScene.add(n);
+                    }
+                });
+                console.log('[preview] [' + sf + '] skeleton shared, meshes moved');
+            } else {
+                gltf.scene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
+                baseScene.add(gltf.scene);
+                console.log('[preview] [' + sf + '] added as sibling (no skeleton sharing)');
             }
         });
-        console.log('[modular] moved clothing meshes into base scene, skeleton shared');
-    } else {
-        console.log('[modular] fallback: adding clothing scene as sibling (no skeleton sharing)');
-        clothingScene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
-        baseScene.add(clothingScene);
-    }
 
-    Object.values(clothingIndex).forEach(m => { m.visible = false; });
+        for (var sf2 in clothingIndices) {
+            for (var mn in clothingIndices[sf2]) {
+                clothingIndices[sf2][mn].visible = false;
+            }
+        }
 
-    scene.add(baseScene);
-    model = baseScene;
-    layout(baseScene);
+        scene.add(baseScene);
+        model = baseScene;
+        layout(baseScene);
 
-    console.log('[modular] base animations:', baseGltf.animations.map(c => c.name + ' (' + c.duration.toFixed(2) + 's)'));
-    console.log('[modular] clothing animations:', clothingGltf.animations.map(c => c.name + ' (' + c.duration.toFixed(2) + 's)'));
+        for (var slotKey in initConfig) {
+            if (initConfig[slotKey]) applyEquip(slotKey, initConfig[slotKey]);
+        }
 
-    initEquip.forEach(slot => window._equip(slot));
+        var allAnims = [baseGltf].concat(clothingGltfs);
+        var clips = [];
+        allAnims.forEach(function(g) { clips = clips.concat(g.animations); });
+        if (clips.length > 0) {
+            mixer = new THREE.AnimationMixer(baseScene);
+            clips.forEach(function(clip) {
+                mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
+            });
+            console.log('[preview] animations:', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
+        }
 
-    tick();
-    requestAnimationFrame(() => {
-        notify({state:'ready', baseMeshCount:Object.keys(baseIndex).length, clothingMeshCount:Object.keys(clothingIndex).length});
+        tick();
+        var clothingCounts = {};
+        for (var sfk in clothingIndices) clothingCounts[sfk] = Object.keys(clothingIndices[sfk]).length;
+        requestAnimationFrame(function() {
+            notify({
+                state:'ready',
+                baseMeshCount: Object.keys(baseIndex).length,
+                clothingMeshCounts: clothingCounts,
+                lookupNotes: lookupNotes,
+                animationClips: clips.map(function(c) { return c.name; })
+            });
+        });
+    }).catch(function(err) {
+        console.error('[preview] load error:', err);
+        notify({state:'loadError', error: String(err)});
     });
-}).catch(err => {
-    console.error('[modular] load error:', err);
-    notify({state:'loadError', error: String(err)});
-});
 
-window.addEventListener('pagehide', () => { window._pause(); ctrl.dispose(); });
+} else {
+    var modelURL = baseOrigin + '/models/' + encodeURIComponent(modelName) + '.glb';
+    loader.load(modelURL, function(gltf) {
+        model = gltf.scene;
+        model.rotation.y = THREE.MathUtils.degToRad(yawDeg);
+        setupMaterials(model);
+        scene.add(model);
+        layout(model);
+
+        if (gltf.animations.length > 0) {
+            mixer = new THREE.AnimationMixer(model);
+            gltf.animations.forEach(function(clip) {
+                var a = mixer.clipAction(clip);
+                a.setLoop(THREE.LoopRepeat, Infinity);
+                a.play();
+            });
+        }
+
+        tick();
+        requestAnimationFrame(function() { notify('ready'); });
+    }, undefined, function(err) {
+        notify({state:'loadError', error: String(err)});
+    });
+}
+
+window.addEventListener('pagehide', function() { window._pause(); ctrl.dispose(); });
 </script>
 </body>
 </html>

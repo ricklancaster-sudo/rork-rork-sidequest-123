@@ -166,7 +166,8 @@ struct ProfileTabView: View {
 
     private var characterPreview: some View {
         ZStack(alignment: .bottom) {
-            ModularCharacter3DView(
+            Character3DView(
+                characterType: appState.profile.selectedCharacter,
                 allowsControl: true,
                 autoRotate: false,
                 framing: .fullBody,
