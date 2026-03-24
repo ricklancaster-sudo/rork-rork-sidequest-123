@@ -15,6 +15,7 @@ struct Character3DView: View {
     @State private var isPreviewReady: Bool = false
     @State private var loadError: String? = nil
     @State private var lookupNotes: [String] = []
+    @State private var slotDebugInfo: [String: SlotDebugEntry] = [:]
 
     var body: some View {
         ZStack {
@@ -24,7 +25,8 @@ struct Character3DView: View {
                 isActive: isActive,
                 isPreviewReady: $isPreviewReady,
                 loadError: $loadError,
-                lookupNotes: $lookupNotes
+                lookupNotes: $lookupNotes,
+                slotDebugInfo: $slotDebugInfo
             )
 
             if !isPreviewReady {
@@ -99,6 +101,16 @@ struct CharacterPreviewRequest: Sendable {
     }
 }
 
+struct SlotDebugEntry: Sendable {
+    let slot: String
+    let equipped: Bool
+    let found: Int
+    let total: Int
+    let missing: [String]
+    let cloneCount: Int
+    let notes: [String]
+}
+
 private struct CharacterWebView: UIViewRepresentable {
     let request: CharacterPreviewRequest
     let equipment: CharacterEquipmentState?
@@ -106,12 +118,14 @@ private struct CharacterWebView: UIViewRepresentable {
     @Binding var isPreviewReady: Bool
     @Binding var loadError: String?
     @Binding var lookupNotes: [String]
+    @Binding var slotDebugInfo: [String: SlotDebugEntry]
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             isPreviewReady: $isPreviewReady,
             loadError: $loadError,
-            lookupNotes: $lookupNotes
+            lookupNotes: $lookupNotes,
+            slotDebugInfo: $slotDebugInfo
         )
     }
 
@@ -145,6 +159,7 @@ private struct CharacterWebView: UIViewRepresentable {
         context.coordinator.isPreviewReady = $isPreviewReady
         context.coordinator.loadError = $loadError
         context.coordinator.lookupNotes = $lookupNotes
+        context.coordinator.slotDebugInfo = $slotDebugInfo
         context.coordinator.load(request)
         if let equipment {
             context.coordinator.updateEquipment(equipment)
@@ -164,15 +179,18 @@ private struct CharacterWebView: UIViewRepresentable {
         var isPreviewReady: Binding<Bool>
         var loadError: Binding<String?>
         var lookupNotes: Binding<[String]>
+        var slotDebugInfo: Binding<[String: SlotDebugEntry]>
 
         init(
             isPreviewReady: Binding<Bool>,
             loadError: Binding<String?>,
-            lookupNotes: Binding<[String]>
+            lookupNotes: Binding<[String]>,
+            slotDebugInfo: Binding<[String: SlotDebugEntry]>
         ) {
             self.isPreviewReady = isPreviewReady
             self.loadError = loadError
             self.lookupNotes = lookupNotes
+            self.slotDebugInfo = slotDebugInfo
         }
 
         func bind(_ webView: WKWebView) {
@@ -311,6 +329,24 @@ private struct CharacterWebView: UIViewRepresentable {
                 isReady = false
                 isPreviewReady.wrappedValue = false
                 loadError.wrappedValue = payload?["error"] as? String ?? "Unknown error"
+            case "slotChanged":
+                let slot = payload?["slot"] as? String ?? "unknown"
+                let equipped = payload?["equipped"] as? Bool ?? false
+                let found = payload?["found"] as? Int ?? 0
+                let total = payload?["total"] as? Int ?? 0
+                let missing = payload?["missing"] as? [String] ?? []
+                let cloneCount = payload?["cloneCount"] as? Int ?? 0
+                let notes = payload?["notes"] as? [String] ?? []
+                let entry = SlotDebugEntry(
+                    slot: slot, equipped: equipped,
+                    found: found, total: total,
+                    missing: missing, cloneCount: cloneCount,
+                    notes: notes
+                )
+                slotDebugInfo.wrappedValue[slot] = entry
+                if !missing.isEmpty {
+                    print("[Character3D] slot \(slot) missing meshes: \(missing)")
+                }
             default:
                 break
             }

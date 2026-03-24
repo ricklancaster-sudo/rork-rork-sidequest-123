@@ -498,8 +498,10 @@ const loader = new GLTFLoader();
 
 const baseIndex = {};
 const clothingIndices = {};
+const clothingScenes = {};
 let baseSkeleton = null;
 const equippedState = {};
+const slotInstances = {};
 const lookupNotes = [];
 
 function findMesh(index, name) {
@@ -532,11 +534,21 @@ function findNodeByName(root, name) {
     if (found) return found;
     var lower = name.toLowerCase();
     root.traverse(n => { if (!found && n.name.toLowerCase() === lower) found = n; });
+    if (!found) {
+        var stripped = name.toLowerCase().replace(/[-_]?local$/i, '');
+        root.traverse(n => {
+            if (!found) {
+                var ns = n.name.toLowerCase().replace(/[-_]?local$/i, '');
+                if (ns === stripped) found = n;
+            }
+        });
+    }
     return found;
 }
 
-function rebindToSkeleton(skinnedMesh, targetSkeleton) {
-    var srcBones = skinnedMesh.skeleton.bones;
+function rebindCloneToSkeleton(clonedMesh, targetSkeleton) {
+    if (!clonedMesh.isSkinnedMesh || !clonedMesh.skeleton) return 0;
+    var srcBones = clonedMesh.skeleton.bones;
     var mapped = [];
     var matchCount = 0;
     for (var i = 0; i < srcBones.length; i++) {
@@ -556,44 +568,161 @@ function rebindToSkeleton(skinnedMesh, targetSkeleton) {
             lookupNotes.push('bone-miss:' + srcName);
         }
     }
-    var bindMat = skinnedMesh.bindMatrix.clone();
-    var newSkel = new THREE.Skeleton(mapped);
-    skinnedMesh.bind(newSkel, bindMat);
-    console.log('[preview] rebound ' + skinnedMesh.name + ': ' + matchCount + '/' + srcBones.length);
+    var bindMat = clonedMesh.bindMatrix.clone();
+    var invs = [];
+    for (var k = 0; k < mapped.length; k++) {
+        var inv = new THREE.Matrix4();
+        inv.copy(mapped[k].matrixWorld).invert();
+        invs.push(inv);
+    }
+    var newSkel = new THREE.Skeleton(mapped, invs);
+    clonedMesh.bind(newSkel, bindMat);
+    return matchCount;
+}
+
+function resolveSourceMesh(sf, meshName, config) {
+    var sourceHints = config.sourceNodeHints || {};
+    var hint = sourceHints[meshName];
+    if (hint && clothingScenes[sf]) {
+        var hintNode = findNodeByName(clothingScenes[sf], hint);
+        if (hintNode) {
+            if (hintNode.isMesh) {
+                lookupNotes.push('src-hint-direct:' + meshName + '<-' + hint + '=' + hintNode.name);
+                return hintNode;
+            }
+            var foundChild = null;
+            hintNode.traverse(function(c) {
+                if (!foundChild && c.isMesh) {
+                    if (c.name === meshName) foundChild = c;
+                }
+            });
+            if (!foundChild) {
+                hintNode.traverse(function(c) {
+                    if (!foundChild && c.isMesh) foundChild = c;
+                });
+            }
+            if (foundChild) {
+                lookupNotes.push('src-hint-child:' + meshName + '<-' + hint + '=' + foundChild.name);
+                return foundChild;
+            }
+            lookupNotes.push('src-hint-no-mesh:' + hint);
+        } else {
+            lookupNotes.push('src-hint-miss:' + hint + ':for:' + meshName);
+        }
+    }
+    var direct = findClothingMesh(sf, meshName);
+    if (direct) lookupNotes.push('src-direct:' + meshName + '=' + direct.name);
+    return direct;
+}
+
+function resolveBaseParent(meshName, config) {
+    var parentHints = config.parentNodeHints || {};
+    var hint = parentHints[meshName];
+    if (!hint || !model) return null;
+    if (baseSkeleton) {
+        for (var i = 0; i < baseSkeleton.bones.length; i++) {
+            var bone = baseSkeleton.bones[i];
+            if (bone.name === hint) return bone;
+            var bLower = bone.name.toLowerCase().replace(/[-_]?local$/i, '');
+            var hLower = hint.toLowerCase().replace(/[-_]?local$/i, '');
+            if (bLower === hLower) {
+                lookupNotes.push('parent-fuzzy-bone:' + hint + '->' + bone.name);
+                return bone;
+            }
+        }
+    }
+    var node = findNodeByName(model, hint);
+    if (node) { lookupNotes.push('parent-node:' + hint + '->' + node.name); return node; }
+    lookupNotes.push('parent-miss:' + hint + ':for:' + meshName);
+    return null;
 }
 
 function applyEquip(slot, config) {
-    var found = 0, missing = [];
+    if (slotInstances[slot]) {
+        slotInstances[slot].forEach(function(obj) { obj.removeFromParent(); });
+    }
+    slotInstances[slot] = [];
+
     var sf = config.sourceFile || '';
-    (config.meshNames || []).forEach(function(name) {
-        var m = sf ? findClothingMesh(sf, name) : findMesh(clothingIndices[Object.keys(clothingIndices)[0]] || {}, name);
-        if (m) { m.visible = true; found++; }
-        else { missing.push(name); }
+    var found = 0, missing = [], cloned = [];
+
+    (config.meshNames || []).forEach(function(meshName) {
+        var srcMesh = resolveSourceMesh(sf, meshName, config);
+        if (!srcMesh) {
+            missing.push(meshName);
+            lookupNotes.push('equip-miss:' + sf + ':' + meshName);
+            return;
+        }
+
+        var clone = srcMesh.clone();
+        clone.name = srcMesh.name + '__eq__' + slot;
+        clone.frustumCulled = false;
+        clone.castShadow = true;
+        clone.receiveShadow = false;
+        clone.visible = true;
+
+        if (clone.isSkinnedMesh && baseSkeleton) {
+            var matched = rebindCloneToSkeleton(clone, baseSkeleton);
+            if (model) model.add(clone);
+            lookupNotes.push('clone-skinned:' + meshName + ':bones=' + matched);
+        } else {
+            var parent = resolveBaseParent(meshName, config);
+            if (parent) {
+                parent.add(clone);
+                clone.position.set(0, 0, 0);
+                clone.rotation.set(0, 0, 0);
+                clone.scale.set(1, 1, 1);
+                lookupNotes.push('clone-attached:' + meshName + '->' + parent.name);
+            } else if (model) {
+                model.add(clone);
+                lookupNotes.push('clone-root:' + meshName);
+            }
+        }
+
+        var sc = config.scale || 1.0;
+        if (sc !== 1.0) clone.scale.multiplyScalar(sc);
+
+        slotInstances[slot].push(clone);
+        cloned.push(meshName);
+        found++;
     });
+
     (config.hideBaseMeshes || []).forEach(function(name) {
         var m = findMesh(baseIndex, name);
         if (m) m.visible = false;
     });
+
     equippedState[slot] = config;
-    console.log('[preview] equip ' + slot + ': ' + found + '/' + (config.meshNames||[]).length + ' missing=' + JSON.stringify(missing));
-    notify({state:'slotChanged', slot:slot, equipped:true, found:found, total:(config.meshNames||[]).length, missing:missing});
+    var hiddenBase = (config.hideBaseMeshes || []).filter(function(n) { return !!findMesh(baseIndex, n); });
+    var info = {
+        state:'slotChanged', slot:slot, equipped:true,
+        found:found, total:(config.meshNames||[]).length,
+        missing:missing, cloned:cloned,
+        cloneCount:slotInstances[slot].length,
+        hiddenBaseMeshes:hiddenBase,
+        notes:lookupNotes.slice(-30)
+    };
+    console.log('[preview] equip ' + slot + ':', JSON.stringify({found:found, missing:missing, cloned:cloned}));
+    notify(info);
 }
 
 function applyUnequip(slot) {
+    if (slotInstances[slot]) {
+        slotInstances[slot].forEach(function(obj) { obj.removeFromParent(); });
+        console.log('[preview] removed ' + slotInstances[slot].length + ' clones for ' + slot);
+        delete slotInstances[slot];
+    }
+
     var config = equippedState[slot];
-    if (!config) return;
-    var sf = config.sourceFile || '';
-    (config.meshNames || []).forEach(function(name) {
-        var m = sf ? findClothingMesh(sf, name) : null;
-        if (m) m.visible = false;
-    });
-    (config.hideBaseMeshes || []).forEach(function(name) {
-        var m = findMesh(baseIndex, name);
-        if (m) m.visible = true;
-    });
+    if (config) {
+        (config.hideBaseMeshes || []).forEach(function(name) {
+            var m = findMesh(baseIndex, name);
+            if (m) m.visible = true;
+        });
+    }
+
     delete equippedState[slot];
-    console.log('[preview] unequip ' + slot);
-    notify({state:'slotChanged', slot:slot, equipped:false});
+    notify({state:'slotChanged', slot:slot, equipped:false, notes:lookupNotes.slice(-10)});
 }
 
 window._equip = function(slot, configJSON) {
@@ -603,6 +732,17 @@ window._equip = function(slot, configJSON) {
 
 window._unequip = function(slot) {
     applyUnequip(slot);
+};
+
+window._debugState = function() {
+    var active = {};
+    for (var s in slotInstances) active[s] = slotInstances[s].map(function(o) { return o.name; });
+    return JSON.stringify({
+        equipped: Object.keys(equippedState),
+        activeClones: active,
+        baseMeshCount: Object.keys(baseIndex).length,
+        lookupNotes: lookupNotes.slice(-50)
+    });
 };
 
 if (mode === 'modular') {
@@ -639,47 +779,24 @@ if (mode === 'modular') {
 
         console.log('[preview] base meshes:', Object.keys(baseIndex));
         if (baseSkeleton) {
-            console.log('[preview] base skeleton bones:', baseSkeleton.bones.length);
+            console.log('[preview] base skeleton bones:', baseSkeleton.bones.map(function(b){return b.name;}));
         }
 
         clothingGltfs.forEach(function(gltf, i) {
             var sf = sourceFileList[i];
             clothingIndices[sf] = {};
+            clothingScenes[sf] = gltf.scene;
             setupMaterials(gltf.scene);
 
-            var skinnedMeshes = [];
             gltf.scene.traverse(function(n) {
                 if (n.isMesh) clothingIndices[sf][n.name] = n;
-                if (n.isSkinnedMesh) skinnedMeshes.push(n);
             });
 
             console.log('[preview] clothing [' + sf + '] meshes:', Object.keys(clothingIndices[sf]));
-
-            if (baseSkeleton && skinnedMeshes.length > 0) {
-                skinnedMeshes.forEach(function(mesh) {
-                    rebindToSkeleton(mesh, baseSkeleton);
-                });
-                var nodes = [];
-                gltf.scene.traverse(function(n) { nodes.push(n); });
-                nodes.forEach(function(n) {
-                    if (n.isMesh) {
-                        n.removeFromParent();
-                        baseScene.add(n);
-                    }
-                });
-                console.log('[preview] [' + sf + '] skeleton shared, meshes moved');
-            } else {
-                gltf.scene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
-                baseScene.add(gltf.scene);
-                console.log('[preview] [' + sf + '] added as sibling (no skeleton sharing)');
-            }
+            var nodeNames = [];
+            gltf.scene.traverse(function(n) { nodeNames.push(n.name + (n.isMesh ? '[M]' : '')); });
+            console.log('[preview] clothing [' + sf + '] nodes:', nodeNames);
         });
-
-        for (var sf2 in clothingIndices) {
-            for (var mn in clothingIndices[sf2]) {
-                clothingIndices[sf2][mn].visible = false;
-            }
-        }
 
         scene.add(baseScene);
         model = baseScene;
@@ -703,11 +820,14 @@ if (mode === 'modular') {
         tick();
         var clothingCounts = {};
         for (var sfk in clothingIndices) clothingCounts[sfk] = Object.keys(clothingIndices[sfk]).length;
+        var activeSlots = {};
+        for (var si in slotInstances) activeSlots[si] = slotInstances[si].length;
         requestAnimationFrame(function() {
             notify({
                 state:'ready',
                 baseMeshCount: Object.keys(baseIndex).length,
                 clothingMeshCounts: clothingCounts,
+                activeSlots: activeSlots,
                 lookupNotes: lookupNotes,
                 animationClips: clips.map(function(c) { return c.name; })
             });
