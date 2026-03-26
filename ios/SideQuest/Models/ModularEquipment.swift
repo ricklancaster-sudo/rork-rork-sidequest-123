@@ -35,8 +35,8 @@ nonisolated struct EquipmentItem: Codable, Sendable, Identifiable, Equatable {
     let meshNames: [String]
     let hideBaseMeshes: [String]
     let scale: Double
-    let parentNodeHints: [String: String]
-    var sourceNodeHints: [String: String]
+    let parentNodeHints: [String: [String]]
+    var sourceNodeHints: [String: [String]]
 
     static func == (lhs: EquipmentItem, rhs: EquipmentItem) -> Bool {
         lhs.id == rhs.id
@@ -90,26 +90,26 @@ nonisolated struct EquipmentCatalog: Sendable {
                 ],
                 scale: 1.0,
                 parentNodeHints: [
-                    "Belly-Mesh": "Rest_Jacket-Local",
-                    "Chest_A-Mesh": "Chest_Jacket-Local",
-                    "LeftArm-Mesh": "L_Arm-Local",
-                    "LeftForearm-Mesh": "L_Forearm-Local",
-                    "LeftHand-Mesh": "L_Hand-Local",
-                    "RightArm-Mesh": "R_Arm-Local",
-                    "RightForearm-Mesh": "R_Forearm-Local",
-                    "RightHand-Mesh": "R_Hand-Local",
-                    "Scarf-Mesh": "Scarf-Local"
+                    "Belly-Mesh": ["Rest_Jacket-Global", "Belly-Global", "Belly-Local"],
+                    "Chest_A-Mesh": ["Chest_Jacket-Global", "Chest-Global", "Chest-Local"],
+                    "LeftArm-Mesh": ["L_Arm-Global", "Left_Arm-Global", "Left_Arm-Local"],
+                    "LeftForearm-Mesh": ["L_Forearm-Global", "Left_Forearm-Global", "Left_Forearm-Local"],
+                    "LeftHand-Mesh": ["L_Hand-Global", "Left_Hand-Global", "Left_Hand-Local"],
+                    "RightArm-Mesh": ["R_Arm-Global", "Right_Arm-Global", "Right_Arm-Local"],
+                    "RightForearm-Mesh": ["R_Forearm-Global", "Right_Forearm-Global", "Right_Forearm-Local"],
+                    "RightHand-Mesh": ["R_Hand-Global", "Right_Hand-Global", "Right_Hand-Local"],
+                    "Scarf-Mesh": ["Scarf-Global", "Chest-Global", "Chest-Local"]
                 ],
                 sourceNodeHints: [
-                    "Belly-Mesh": "Rest_Jacket-Local",
-                    "Chest_A-Mesh": "Chest_Jacket-Local",
-                    "LeftArm-Mesh": "L_Arm-Local",
-                    "LeftForearm-Mesh": "L_Forearm-Local",
-                    "LeftHand-Mesh": "L_Hand-Local",
-                    "RightArm-Mesh": "R_Arm-Local",
-                    "RightForearm-Mesh": "R_Forearm-Local",
-                    "RightHand-Mesh": "R_Hand-Local",
-                    "Scarf-Mesh": "Scarf-Local"
+                    "Belly-Mesh": ["Rest_Jacket-Local", "Belly-Mesh"],
+                    "Chest_A-Mesh": ["Chest_Jacket-Local", "Chest_A-Mesh"],
+                    "LeftArm-Mesh": ["L_Arm-Local", "LeftArm-Mesh"],
+                    "LeftForearm-Mesh": ["L_Forearm-Local", "LeftForearm-Mesh"],
+                    "LeftHand-Mesh": ["L_Hand-Local", "LeftHand-Mesh"],
+                    "RightArm-Mesh": ["R_Arm-Local", "RightArm-Mesh"],
+                    "RightForearm-Mesh": ["R_Forearm-Local", "RightForearm-Mesh"],
+                    "RightHand-Mesh": ["R_Hand-Local", "RightHand-Mesh"],
+                    "Scarf-Mesh": ["Scarf-Local", "Scarf-Mesh"]
                 ]
             )
         ],
@@ -131,18 +131,18 @@ nonisolated struct EquipmentCatalog: Sendable {
                 ],
                 scale: 1.0,
                 parentNodeHints: [
-                    "Hip-Mesh": "Pants-Local",
-                    "LeftThigh-Mesh": "L_Thigh-Local",
-                    "LeftLeg-Mesh": "L_Leg-Local",
-                    "RightThigh-Mesh": "R_Thigh-Local",
-                    "RightLeg-Mesh": "R_Leg-Local"
+                    "Hip-Mesh": ["Pants-Global", "Hip-Global", "Hip-Local"],
+                    "LeftThigh-Mesh": ["L_Thigh-Global", "Left_Thigh-Global", "Left_Thigh-Local"],
+                    "LeftLeg-Mesh": ["L_Leg-Global", "Left_Leg-Global", "Left_Leg-Local"],
+                    "RightThigh-Mesh": ["R_Thigh-Global", "Right_Thigh-Global", "Right_Thigh-Local"],
+                    "RightLeg-Mesh": ["R_Leg-Global", "Right_Leg-Global", "Right_Leg-Local"]
                 ],
                 sourceNodeHints: [
-                    "Hip-Mesh": "Pants-Local",
-                    "LeftThigh-Mesh": "L_Thigh-Local",
-                    "LeftLeg-Mesh": "L_Leg-Local",
-                    "RightThigh-Mesh": "R_Thigh-Local",
-                    "RightLeg-Mesh": "R_Leg-Local"
+                    "Hip-Mesh": ["Pants-Local", "Hip-Mesh"],
+                    "LeftThigh-Mesh": ["L_Thigh-Local", "LeftThigh-Mesh"],
+                    "LeftLeg-Mesh": ["L_Leg-Local", "LeftLeg-Mesh"],
+                    "RightThigh-Mesh": ["R_Thigh-Local", "RightThigh-Mesh"],
+                    "RightLeg-Mesh": ["R_Leg-Local", "RightLeg-Mesh"]
                 ]
             )
         ],
@@ -160,12 +160,12 @@ nonisolated struct EquipmentCatalog: Sendable {
                 ],
                 scale: 1.0,
                 parentNodeHints: [
-                    "LeftFoot-Mesh": "L_Foot-Local",
-                    "RightFoot-Mesh": "R_Foot-Local"
+                    "LeftFoot-Mesh": ["L_Foot-Global", "Left_Foot-Global", "Left_Foot-Local"],
+                    "RightFoot-Mesh": ["R_Foot-Global", "Right_Foot-Global", "Right_Foot-Local"]
                 ],
                 sourceNodeHints: [
-                    "LeftFoot-Mesh": "L_Foot-Local",
-                    "RightFoot-Mesh": "R_Foot-Local"
+                    "LeftFoot-Mesh": ["L_Foot-Local", "LeftFoot-Mesh"],
+                    "RightFoot-Mesh": ["R_Foot-Local", "RightFoot-Mesh"]
                 ]
             )
         ],
@@ -181,10 +181,10 @@ nonisolated struct EquipmentCatalog: Sendable {
                 hideBaseMeshes: [],
                 scale: 1.0,
                 parentNodeHints: [
-                    "Hat_A-Mesh": "Hat-Local"
+                    "Hat_A-Mesh": ["Hat-Global", "Head-Global", "Head-Local"]
                 ],
                 sourceNodeHints: [
-                    "Hat_A-Mesh": "Hat-Local"
+                    "Hat_A-Mesh": ["Hat-Local", "Hat_A-Mesh"]
                 ]
             )
         ]

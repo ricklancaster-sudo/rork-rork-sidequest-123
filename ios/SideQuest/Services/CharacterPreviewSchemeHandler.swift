@@ -497,6 +497,7 @@ const baseOrigin = P.origin + (P.pathname.includes('/') ? P.pathname.substring(0
 const loader = new GLTFLoader();
 
 const baseIndex = {};
+const baseObjectIndex = {};
 const clothingIndices = {};
 const clothingScenes = {};
 let baseSkeleton = null;
@@ -535,10 +536,10 @@ function findNodeByName(root, name) {
     var lower = name.toLowerCase();
     root.traverse(n => { if (!found && n.name.toLowerCase() === lower) found = n; });
     if (!found) {
-        var stripped = name.toLowerCase().replace(/[-_]?local$/i, '');
+        var stripped = name.toLowerCase().replace(/[-_]?(local|global)$/i, '');
         root.traverse(n => {
             if (!found) {
-                var ns = n.name.toLowerCase().replace(/[-_]?local$/i, '');
+                var ns = n.name.toLowerCase().replace(/[-_]?(local|global)$/i, '');
                 if (ns === stripped) found = n;
             }
         });
@@ -546,69 +547,105 @@ function findNodeByName(root, name) {
     return found;
 }
 
+function normalizeHintName(name) {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, '').trim();
+}
+
+function findInObjectIndex(index, hints) {
+    if (!hints) return null;
+    if (typeof hints === 'string') hints = [hints];
+    for (var i = 0; i < hints.length; i++) {
+        if (index[hints[i]]) {
+            lookupNotes.push('idx-exact:' + hints[i]);
+            return index[hints[i]];
+        }
+    }
+    var keys = Object.keys(index);
+    for (var i = 0; i < hints.length; i++) {
+        var hNorm = normalizeHintName(hints[i]);
+        if (!hNorm) continue;
+        for (var j = 0; j < keys.length; j++) {
+            var kNorm = normalizeHintName(keys[j]);
+            if (kNorm === hNorm) {
+                lookupNotes.push('idx-fuzzy:' + hints[i] + '->' + keys[j]);
+                return index[keys[j]];
+            }
+        }
+        for (var j = 0; j < keys.length; j++) {
+            var kNorm = normalizeHintName(keys[j]);
+            if (kNorm.includes(hNorm) || hNorm.includes(kNorm)) {
+                lookupNotes.push('idx-partial:' + hints[i] + '->' + keys[j]);
+                return index[keys[j]];
+            }
+        }
+    }
+    return null;
+}
+
 function rebindCloneToSkeleton(clonedMesh, targetSkeleton) {
     if (!clonedMesh.isSkinnedMesh || !clonedMesh.skeleton) return 0;
-    var srcBones = clonedMesh.skeleton.bones;
+    var srcSkel = clonedMesh.skeleton;
+    var srcBones = srcSkel.bones;
+    var srcInverses = srcSkel.boneInverses;
     var mapped = [];
+    var newInverses = [];
     var matchCount = 0;
     for (var i = 0; i < srcBones.length; i++) {
         var srcName = srcBones[i].name;
         var target = null;
+        var tgtIdx = -1;
         for (var j = 0; j < targetSkeleton.bones.length; j++) {
             if (targetSkeleton.bones[j].name === srcName) {
                 target = targetSkeleton.bones[j];
+                tgtIdx = j;
                 break;
             }
         }
         if (target) {
             mapped.push(target);
+            newInverses.push(targetSkeleton.boneInverses[tgtIdx].clone());
             matchCount++;
         } else {
             mapped.push(srcBones[i]);
+            newInverses.push(srcInverses[i].clone());
             lookupNotes.push('bone-miss:' + srcName);
         }
     }
     var bindMat = clonedMesh.bindMatrix.clone();
-    var invs = [];
-    for (var k = 0; k < mapped.length; k++) {
-        var inv = new THREE.Matrix4();
-        inv.copy(mapped[k].matrixWorld).invert();
-        invs.push(inv);
-    }
-    var newSkel = new THREE.Skeleton(mapped, invs);
+    var newSkel = new THREE.Skeleton(mapped, newInverses);
     clonedMesh.bind(newSkel, bindMat);
     return matchCount;
 }
 
 function resolveSourceMesh(sf, meshName, config) {
     var sourceHints = config.sourceNodeHints || {};
-    var hint = sourceHints[meshName];
-    if (hint && clothingScenes[sf]) {
-        var hintNode = findNodeByName(clothingScenes[sf], hint);
-        if (hintNode) {
-            if (hintNode.isMesh) {
-                lookupNotes.push('src-hint-direct:' + meshName + '<-' + hint + '=' + hintNode.name);
-                return hintNode;
-            }
-            var foundChild = null;
-            hintNode.traverse(function(c) {
-                if (!foundChild && c.isMesh) {
-                    if (c.name === meshName) foundChild = c;
+    var hints = sourceHints[meshName];
+    if (typeof hints === 'string') hints = [hints];
+    if (hints && Array.isArray(hints) && clothingScenes[sf]) {
+        for (var hi = 0; hi < hints.length; hi++) {
+            var hint = hints[hi];
+            var hintNode = findNodeByName(clothingScenes[sf], hint);
+            if (hintNode) {
+                if (hintNode.isMesh) {
+                    lookupNotes.push('src-hint-direct:' + meshName + '<-' + hint + '=' + hintNode.name);
+                    return hintNode;
                 }
-            });
-            if (!foundChild) {
+                var foundChild = null;
                 hintNode.traverse(function(c) {
-                    if (!foundChild && c.isMesh) foundChild = c;
+                    if (!foundChild && c.isMesh && c.name === meshName) foundChild = c;
                 });
+                if (!foundChild) {
+                    hintNode.traverse(function(c) {
+                        if (!foundChild && c.isMesh) foundChild = c;
+                    });
+                }
+                if (foundChild) {
+                    lookupNotes.push('src-hint-child:' + meshName + '<-' + hint + '=' + foundChild.name);
+                    return foundChild;
+                }
             }
-            if (foundChild) {
-                lookupNotes.push('src-hint-child:' + meshName + '<-' + hint + '=' + foundChild.name);
-                return foundChild;
-            }
-            lookupNotes.push('src-hint-no-mesh:' + hint);
-        } else {
-            lookupNotes.push('src-hint-miss:' + hint + ':for:' + meshName);
         }
+        lookupNotes.push('src-hints-miss:' + JSON.stringify(hints) + ':for:' + meshName);
     }
     var direct = findClothingMesh(sf, meshName);
     if (direct) lookupNotes.push('src-direct:' + meshName + '=' + direct.name);
@@ -617,23 +654,40 @@ function resolveSourceMesh(sf, meshName, config) {
 
 function resolveBaseParent(meshName, config) {
     var parentHints = config.parentNodeHints || {};
-    var hint = parentHints[meshName];
-    if (!hint || !model) return null;
+    var hints = parentHints[meshName];
+    if (!hints || !model) return null;
+    if (typeof hints === 'string') hints = [hints];
+    var result = findInObjectIndex(baseObjectIndex, hints);
+    if (result) {
+        lookupNotes.push('parent-resolved:' + meshName + '->' + result.name);
+        return result;
+    }
     if (baseSkeleton) {
-        for (var i = 0; i < baseSkeleton.bones.length; i++) {
-            var bone = baseSkeleton.bones[i];
-            if (bone.name === hint) return bone;
-            var bLower = bone.name.toLowerCase().replace(/[-_]?local$/i, '');
-            var hLower = hint.toLowerCase().replace(/[-_]?local$/i, '');
-            if (bLower === hLower) {
-                lookupNotes.push('parent-fuzzy-bone:' + hint + '->' + bone.name);
-                return bone;
+        for (var hi = 0; hi < hints.length; hi++) {
+            var hint = hints[hi];
+            for (var i = 0; i < baseSkeleton.bones.length; i++) {
+                var bone = baseSkeleton.bones[i];
+                if (bone.name === hint) {
+                    lookupNotes.push('parent-bone-exact:' + hint + '->' + bone.name);
+                    return bone;
+                }
+                var bLower = bone.name.toLowerCase().replace(/[-_]?(local|global)$/i, '');
+                var hLower = hint.toLowerCase().replace(/[-_]?(local|global)$/i, '');
+                if (bLower === hLower) {
+                    lookupNotes.push('parent-bone-fuzzy:' + hint + '->' + bone.name);
+                    return bone;
+                }
             }
         }
     }
-    var node = findNodeByName(model, hint);
-    if (node) { lookupNotes.push('parent-node:' + hint + '->' + node.name); return node; }
-    lookupNotes.push('parent-miss:' + hint + ':for:' + meshName);
+    for (var hi = 0; hi < hints.length; hi++) {
+        var node = findNodeByName(model, hints[hi]);
+        if (node) {
+            lookupNotes.push('parent-node:' + hints[hi] + '->' + node.name);
+            return node;
+        }
+    }
+    lookupNotes.push('parent-miss:' + JSON.stringify(hints) + ':for:' + meshName);
     return null;
 }
 
@@ -661,22 +715,27 @@ function applyEquip(slot, config) {
         clone.receiveShadow = false;
         clone.visible = true;
 
+        var parent = resolveBaseParent(meshName, config);
+
         if (clone.isSkinnedMesh && baseSkeleton) {
             var matched = rebindCloneToSkeleton(clone, baseSkeleton);
+            clone.position.copy(srcMesh.position);
+            clone.quaternion.copy(srcMesh.quaternion);
+            clone.scale.copy(srcMesh.scale);
             if (model) model.add(clone);
-            lookupNotes.push('clone-skinned:' + meshName + ':bones=' + matched);
-        } else {
-            var parent = resolveBaseParent(meshName, config);
-            if (parent) {
-                parent.add(clone);
-                clone.position.set(0, 0, 0);
-                clone.rotation.set(0, 0, 0);
-                clone.scale.set(1, 1, 1);
-                lookupNotes.push('clone-attached:' + meshName + '->' + parent.name);
-            } else if (model) {
-                model.add(clone);
-                lookupNotes.push('clone-root:' + meshName);
-            }
+            lookupNotes.push('clone-skinned:' + meshName + ':bones=' + matched + ':parent=' + (parent ? parent.name : 'root'));
+        } else if (parent) {
+            clone.position.copy(srcMesh.position);
+            clone.quaternion.copy(srcMesh.quaternion);
+            clone.scale.copy(srcMesh.scale);
+            parent.add(clone);
+            lookupNotes.push('clone-attached:' + meshName + '->' + parent.name + ':pos=' + clone.position.toArray().join(',') + ':quat=' + clone.quaternion.toArray().join(','));
+        } else if (model) {
+            clone.position.copy(srcMesh.position);
+            clone.quaternion.copy(srcMesh.quaternion);
+            clone.scale.copy(srcMesh.scale);
+            model.add(clone);
+            lookupNotes.push('clone-root-fallback:' + meshName + ':pos=' + clone.position.toArray().join(','));
         }
 
         var sc = config.scale || 1.0;
@@ -772,10 +831,15 @@ if (mode === 'modular') {
         baseScene.rotation.y = THREE.MathUtils.degToRad(yawDeg);
         setupMaterials(baseScene);
 
-        baseScene.traverse(function(n) { if (n.isMesh) baseIndex[n.name] = n; });
+        baseScene.traverse(function(n) {
+            if (n.name) baseObjectIndex[n.name] = n;
+            if (n.isMesh) baseIndex[n.name] = n;
+        });
         baseScene.traverse(function(n) {
             if (n.isSkinnedMesh && !baseSkeleton) baseSkeleton = n.skeleton;
         });
+
+        console.log('[preview] base objects:', Object.keys(baseObjectIndex));
 
         console.log('[preview] base meshes:', Object.keys(baseIndex));
         if (baseSkeleton) {
