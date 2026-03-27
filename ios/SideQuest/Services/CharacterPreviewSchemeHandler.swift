@@ -870,15 +870,16 @@ if (mode === 'modular') {
             if (initConfig[slotKey]) applyEquip(slotKey, initConfig[slotKey]);
         }
 
-        var allAnims = [baseGltf].concat(clothingGltfs);
-        var clips = [];
-        allAnims.forEach(function(g) { clips = clips.concat(g.animations); });
+        var clothingClips = [];
+        clothingGltfs.forEach(function(g) { clothingClips = clothingClips.concat(g.animations); });
+        var baseClips = baseGltf.animations || [];
+        var clips = clothingClips.length > 0 ? clothingClips : baseClips;
         if (clips.length > 0) {
             mixer = new THREE.AnimationMixer(baseScene);
             clips.forEach(function(clip) {
                 mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
             });
-            console.log('[preview] animations:', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
+            console.log('[preview] animations (source: ' + (clothingClips.length > 0 ? 'clothing' : 'base') + '):', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
         }
 
         tick();
