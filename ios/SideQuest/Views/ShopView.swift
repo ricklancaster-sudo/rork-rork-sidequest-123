@@ -3,10 +3,11 @@ import SwiftUI
 struct ShopView: View {
     let appState: AppState
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedCategory: ShopCategory = .skins
+    @State private var selectedCategory: ShopCategory = .skinPacks
     @State private var purchaseTarget: ShopItem?
     @State private var showPurchaseResult: Bool = false
     @State private var purchaseSuccess: Bool = false
+    @State private var selectedPack: SkinPack?
 
     var body: some View {
         NavigationStack {
@@ -14,7 +15,13 @@ struct ShopView: View {
                 VStack(spacing: 20) {
                     goldBar
                     categoryPicker
-                    shopGrid
+
+                    switch selectedCategory {
+                    case .skinPacks:
+                        skinPacksSection
+                    default:
+                        shopGrid
+                    }
                 }
                 .padding(16)
             }
@@ -30,6 +37,9 @@ struct ShopView: View {
                 Button("OK") {}
             } message: {
                 Text(purchaseSuccess ? "Item added to your collection." : "Earn more gold by completing quests.")
+            }
+            .sheet(item: $selectedPack) { pack in
+                SkinPackDetailView(appState: appState, pack: pack)
             }
         }
     }
@@ -95,6 +105,158 @@ struct ShopView: View {
         .scrollIndicators(.hidden)
     }
 
+    // MARK: - Skin Packs
+
+    private var skinPacksSection: some View {
+        VStack(spacing: 16) {
+            ForEach(SkinPackCatalog.allPacks) { pack in
+                skinPackCard(pack)
+            }
+        }
+    }
+
+    private func skinPackCard(_ pack: SkinPack) -> some View {
+        let ownedCount = appState.ownedPieceCount(for: pack)
+        let totalCount = pack.pieces.count
+        let isFullyOwned = ownedCount == totalCount
+
+        return Button {
+            selectedPack = pack
+        } label: {
+            VStack(spacing: 0) {
+                ZStack(alignment: .bottom) {
+                    RoundedRectangle(cornerRadius: 0)
+                        .fill(pack.gradient)
+                        .frame(height: 180)
+                        .overlay {
+                            Character3DView(
+                                characterType: appState.profile.selectedCharacter,
+                                allowsControl: false,
+                                autoRotate: true,
+                                framing: .fullBody,
+                                modelYawDegrees: 180,
+                                equipment: .fullCowboy
+                            )
+                            .allowsHitTesting(false)
+                        }
+                        .overlay(alignment: .topLeading) {
+                            HStack(spacing: 6) {
+                                Image(systemName: pack.icon)
+                                    .font(.caption.weight(.bold))
+                                Text(pack.name)
+                                    .font(.subheadline.weight(.bold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(.black.opacity(0.4), in: Capsule())
+                            .padding(12)
+                        }
+                        .overlay(alignment: .topTrailing) {
+                            if isFullyOwned {
+                                Text("OWNED")
+                                    .font(.caption2.weight(.black))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(.green.gradient, in: Capsule())
+                                    .padding(12)
+                            } else if pack.savingsPercent > 0 {
+                                Text("SAVE \(pack.savingsPercent)%")
+                                    .font(.caption2.weight(.black))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(.orange.gradient, in: Capsule())
+                                    .padding(12)
+                            }
+                        }
+
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.6)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 60)
+                }
+
+                VStack(spacing: 10) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(pack.name) Pack")
+                                .font(.headline)
+                            Text("\(totalCount) pieces · \(ownedCount)/\(totalCount) owned")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+
+                        if isFullyOwned {
+                            Button {
+                                appState.equipFullSkinPack(pack)
+                            } label: {
+                                Text("Equip All")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(.blue.gradient, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            let cost = appState.bundleCostForUnowned(pack)
+                            HStack(spacing: 4) {
+                                Image(systemName: "dollarsign.circle.fill")
+                                    .foregroundStyle(.yellow)
+                                    .font(.caption)
+                                Text("\(cost)")
+                                    .font(.subheadline.weight(.bold))
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        ForEach(pack.pieces) { piece in
+                            let owned = appState.isSkinPackPieceOwned(piece.id)
+                            let equipped = appState.characterEquipment.equipped(for: piece.slot) == piece.equipmentItemId
+                            VStack(spacing: 4) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(piece.gradient)
+                                        .frame(height: 44)
+                                    Image(systemName: piece.icon)
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.9))
+                                    if owned && equipped {
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .strokeBorder(.yellow, lineWidth: 2)
+                                            .frame(height: 44)
+                                    } else if owned {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.white)
+                                            .background(.green, in: Circle())
+                                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                                            .padding(3)
+                                    }
+                                }
+                                Text(piece.slot.displayName)
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+                .padding(14)
+            }
+            .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Generic Shop Grid (Backgrounds, Effects, Remove Ads)
+
     private var shopGrid: some View {
         let columns: [GridItem] = [
             GridItem(.flexible(), spacing: 12),
@@ -157,18 +319,8 @@ struct ShopView: View {
             .frame(height: 120)
             .overlay {
                 switch selectedCategory {
-                case .skins:
-                    if let characterType = item.characterType {
-                        Character3DView(
-                            characterType: characterType,
-                            allowsControl: false,
-                            autoRotate: true,
-                            framing: .fullBody,
-                            modelYawDegrees: 180
-                        )
-                        .padding(6)
-                        .allowsHitTesting(false)
-                    }
+                case .skinPacks:
+                    EmptyView()
                 case .callingCards:
                     VStack(spacing: 10) {
                         Image(systemName: "person.crop.circle.fill")
@@ -189,14 +341,6 @@ struct ShopView: View {
                     Image(systemName: item.icon)
                         .font(.system(size: 36, weight: .semibold))
                         .foregroundStyle(.white)
-                }
-            }
-            .overlay(alignment: .topLeading) {
-                if selectedCategory == .skins, let characterType = item.characterType {
-                    Image(systemName: characterType.iconName)
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(8)
                 }
             }
             .overlay(alignment: .topTrailing) {
@@ -220,11 +364,11 @@ struct ShopView: View {
     @ViewBuilder
     private func itemStatus(for item: ShopItem, owned: Bool, equipped: Bool) -> some View {
         if equipped {
-            Text(selectedCategory == .skins ? "Selected" : "Tap to Unequip")
+            Text("Tap to Unequip")
                 .font(.caption.weight(.bold))
-                .foregroundStyle(selectedCategory == .skins ? .green : .yellow)
+                .foregroundStyle(.yellow)
         } else if owned {
-            Text(selectedCategory == .skins ? "Tap to Select" : "Tap to Equip")
+            Text("Tap to Equip")
                 .font(.caption.weight(.bold))
                 .foregroundStyle(.blue)
         } else {
@@ -239,65 +383,36 @@ struct ShopView: View {
 
     private var shopItems: [ShopItem] {
         switch selectedCategory {
-        case .skins:
-            return PlayerCharacterType.allCases.map { character in
-                ShopItem(
-                    name: character.displayName,
-                    icon: character.iconName,
-                    price: character.shopPrice,
-                    gradient: characterGradient(for: character),
-                    characterType: character
-                )
-            }
+        case .skinPacks:
+            return []
         case .callingCards:
             return [
-                ShopItem(name: "Sunset Blaze", icon: "sun.max.fill", price: 200, gradient: .linearGradient(colors: [.orange, .red], startPoint: .topLeading, endPoint: .bottomTrailing), characterType: nil),
-                ShopItem(name: "Arctic Frost", icon: "snowflake", price: 220, gradient: .linearGradient(colors: [.cyan, .blue], startPoint: .topLeading, endPoint: .bottomTrailing), characterType: nil),
-                ShopItem(name: "Royal Night", icon: "moon.stars.fill", price: 250, gradient: .linearGradient(colors: [.indigo, .purple], startPoint: .topLeading, endPoint: .bottomTrailing), characterType: nil),
-                ShopItem(name: "Emerald Dream", icon: "leaf.fill", price: 220, gradient: .linearGradient(colors: [.green, .mint], startPoint: .topLeading, endPoint: .bottomTrailing), characterType: nil)
+                ShopItem(name: "Sunset Blaze", icon: "sun.max.fill", price: 200, gradient: .linearGradient(colors: [.orange, .red], startPoint: .topLeading, endPoint: .bottomTrailing)),
+                ShopItem(name: "Arctic Frost", icon: "snowflake", price: 220, gradient: .linearGradient(colors: [.cyan, .blue], startPoint: .topLeading, endPoint: .bottomTrailing)),
+                ShopItem(name: "Royal Night", icon: "moon.stars.fill", price: 250, gradient: .linearGradient(colors: [.indigo, .purple], startPoint: .topLeading, endPoint: .bottomTrailing)),
+                ShopItem(name: "Emerald Dream", icon: "leaf.fill", price: 220, gradient: .linearGradient(colors: [.green, .mint], startPoint: .topLeading, endPoint: .bottomTrailing))
             ]
         case .effects:
             return [
-                ShopItem(name: "Fire Aura", icon: "flame.fill", price: 800, gradient: .linearGradient(colors: [.red, .orange], startPoint: .topLeading, endPoint: .bottomTrailing), characterType: nil),
-                ShopItem(name: "Lightning", icon: "bolt.fill", price: 700, gradient: .linearGradient(colors: [.yellow, .orange], startPoint: .topLeading, endPoint: .bottomTrailing), characterType: nil),
-                ShopItem(name: "Frost Ring", icon: "snowflake", price: 750, gradient: .linearGradient(colors: [.cyan, .white], startPoint: .topLeading, endPoint: .bottomTrailing), characterType: nil)
+                ShopItem(name: "Fire Aura", icon: "flame.fill", price: 800, gradient: .linearGradient(colors: [.red, .orange], startPoint: .topLeading, endPoint: .bottomTrailing)),
+                ShopItem(name: "Lightning", icon: "bolt.fill", price: 700, gradient: .linearGradient(colors: [.yellow, .orange], startPoint: .topLeading, endPoint: .bottomTrailing)),
+                ShopItem(name: "Frost Ring", icon: "snowflake", price: 750, gradient: .linearGradient(colors: [.cyan, .white], startPoint: .topLeading, endPoint: .bottomTrailing))
             ]
         case .removeAds:
             return [
-                ShopItem(name: "Remove Ads", icon: "xmark.circle.fill", price: 0, gradient: .linearGradient(colors: [.gray, .secondary], startPoint: .topLeading, endPoint: .bottomTrailing), characterType: nil)
+                ShopItem(name: "Remove Ads", icon: "xmark.circle.fill", price: 0, gradient: .linearGradient(colors: [.gray, .secondary], startPoint: .topLeading, endPoint: .bottomTrailing))
             ]
-        }
-    }
-
-    private func characterGradient(for character: PlayerCharacterType) -> LinearGradient {
-        switch character {
-        case .amazonWarrior:
-            LinearGradient(colors: [.pink, .purple], startPoint: .topLeading, endPoint: .bottomTrailing)
-        case .barbarian:
-            LinearGradient(colors: [.orange, .red], startPoint: .topLeading, endPoint: .bottomTrailing)
-        case .gladiator:
-            LinearGradient(colors: [.indigo, .purple], startPoint: .topLeading, endPoint: .bottomTrailing)
-        case .gunslinger:
-            LinearGradient(colors: [.brown, .orange], startPoint: .topLeading, endPoint: .bottomTrailing)
-        case .knight:
-            LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
         }
     }
 
     private func isOwned(_ item: ShopItem) -> Bool {
-        if let characterType = item.characterType {
-            return characterType.isStarterSkin || appState.profile.ownedItems.contains(item.name)
-        }
-        return appState.profile.ownedItems.contains(item.name)
+        appState.profile.ownedItems.contains(item.name)
     }
 
     private func isEquipped(_ item: ShopItem) -> Bool {
         switch selectedCategory {
-        case .skins:
-            if let characterType = item.characterType {
-                return appState.profile.selectedCharacter == characterType
-            }
-            return appState.profile.equippedSkin == item.name
+        case .skinPacks:
+            return false
         case .callingCards:
             return appState.profile.equippedCallingCard == item.name
         case .effects:
@@ -309,6 +424,7 @@ struct ShopView: View {
 
     private func handleTap(on item: ShopItem, owned: Bool) {
         guard selectedCategory != .removeAds else { return }
+        guard selectedCategory != .skinPacks else { return }
 
         if owned {
             appState.equipItem(name: item.name, category: selectedCategory)
@@ -323,11 +439,10 @@ struct ShopItem {
     let icon: String
     let price: Int
     let gradient: LinearGradient
-    let characterType: PlayerCharacterType?
 }
 
 nonisolated enum ShopCategory: String, CaseIterable, Identifiable {
-    case skins = "Skins"
+    case skinPacks = "Skin Packs"
     case callingCards = "Backgrounds"
     case effects = "Effects"
     case removeAds = "Remove Ads"
@@ -336,7 +451,7 @@ nonisolated enum ShopCategory: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .skins: "person.fill"
+        case .skinPacks: "person.2.fill"
         case .callingCards: "photo.stack.fill"
         case .effects: "sparkles"
         case .removeAds: "xmark.circle"

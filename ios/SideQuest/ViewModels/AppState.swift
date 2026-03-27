@@ -2677,10 +2677,8 @@ class AppState {
 
     func equipItem(name: String, category: ShopCategory) {
         switch category {
-        case .skins:
-            guard let character = PlayerCharacterType.shopCharacter(named: name) else { return }
-            selectCharacter(character)
-            return
+        case .skinPacks:
+            break
         case .callingCards:
             let nextBackground: String? = profile.equippedCallingCard == name ? nil : name
             profile.equippedCallingCard = nextBackground
@@ -2691,6 +2689,76 @@ class AppState {
             break
         }
         saveState()
+    }
+
+    func isSkinPackPieceOwned(_ pieceId: String) -> Bool {
+        profile.ownedSkinPackPieces.contains(pieceId)
+    }
+
+    func ownedPieceCount(for pack: SkinPack) -> Int {
+        pack.pieces.filter { profile.ownedSkinPackPieces.contains($0.id) }.count
+    }
+
+    func isFullPackOwned(_ pack: SkinPack) -> Bool {
+        pack.pieces.allSatisfy { profile.ownedSkinPackPieces.contains($0.id) }
+    }
+
+    func purchaseSkinPackPiece(_ piece: SkinPackPiece) -> Bool {
+        guard profile.gold >= piece.price else {
+            showToast(.warning, title: "Not Enough Gold", message: "You need \(piece.price - profile.gold) more gold.")
+            return false
+        }
+        guard !profile.ownedSkinPackPieces.contains(piece.id) else { return false }
+        profile.gold -= piece.price
+        profile.ownedSkinPackPieces.append(piece.id)
+        characterEquipment.setEquipped(piece.equipmentItemId, for: piece.slot)
+        saveState()
+        return true
+    }
+
+    func purchaseSkinPackBundle(_ pack: SkinPack) -> Bool {
+        let unownedPieces = pack.pieces.filter { !profile.ownedSkinPackPieces.contains($0.id) }
+        guard !unownedPieces.isEmpty else { return false }
+        let unownedIndividualCost = unownedPieces.reduce(0) { $0 + $1.price }
+        let fullBundleDiscount = Double(pack.bundlePrice) / Double(pack.individualTotal)
+        let discountedCost = Int(ceil(Double(unownedIndividualCost) * fullBundleDiscount))
+        guard profile.gold >= discountedCost else {
+            showToast(.warning, title: "Not Enough Gold", message: "You need \(discountedCost - profile.gold) more gold.")
+            return false
+        }
+        profile.gold -= discountedCost
+        for piece in unownedPieces {
+            profile.ownedSkinPackPieces.append(piece.id)
+            characterEquipment.setEquipped(piece.equipmentItemId, for: piece.slot)
+        }
+        saveState()
+        return true
+    }
+
+    func equipSkinPackPiece(_ piece: SkinPackPiece) {
+        guard profile.ownedSkinPackPieces.contains(piece.id) else { return }
+        let current = characterEquipment.equipped(for: piece.slot)
+        if current == piece.equipmentItemId {
+            characterEquipment.setEquipped(nil, for: piece.slot)
+        } else {
+            characterEquipment.setEquipped(piece.equipmentItemId, for: piece.slot)
+        }
+        saveState()
+    }
+
+    func equipFullSkinPack(_ pack: SkinPack) {
+        for piece in pack.pieces where profile.ownedSkinPackPieces.contains(piece.id) {
+            characterEquipment.setEquipped(piece.equipmentItemId, for: piece.slot)
+        }
+        saveState()
+    }
+
+    func bundleCostForUnowned(_ pack: SkinPack) -> Int {
+        let unownedPieces = pack.pieces.filter { !profile.ownedSkinPackPieces.contains($0.id) }
+        guard !unownedPieces.isEmpty else { return 0 }
+        let unownedIndividualCost = unownedPieces.reduce(0) { $0 + $1.price }
+        let fullBundleDiscount = Double(pack.bundlePrice) / Double(pack.individualTotal)
+        return Int(ceil(Double(unownedIndividualCost) * fullBundleDiscount))
     }
 
     func purchaseSpriteItem(_ item: SpriteCosmeticItem) -> Bool {

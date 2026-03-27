@@ -37,6 +37,7 @@ nonisolated struct UserProfile: Identifiable, Codable, Sendable {
     var selectedSkills: [UserSkill]
     var selectedInterests: [UserInterest]
     var selectedCharacter: PlayerCharacterType
+    var ownedSkinPackPieces: [String]
 
     var level: Int {
         LevelSystem.level(for: totalScore)
@@ -60,7 +61,7 @@ nonisolated struct UserProfile: Identifiable, Codable, Sendable {
         LevelSystem.title(for: level)
     }
 
-    init(id: String, username: String, avatarName: String, callingCardName: String, totalScore: Int, gold: Int, diamonds: Int, verifiedCount: Int, masterCount: Int, karma: Int, currentStreak: Int, verifiedStreak: Int, stepsToday: Int, stepsThisWeek: Int, handshakeCount: Int, referralCount: Int, warriorRank: Int, explorerRank: Int, mindRank: Int, modSessionsCompleted: Int, modAccuracy: Double, strikes: Int, screenshotStrikes: Int, isSuspended: Bool, modBanUntil: Date? = nil, ownedItems: [String], joinedAt: Date, equippedSkin: String? = nil, equippedCallingCard: String? = nil, equippedEffect: String? = nil, earnedBadges: [String], spriteLoadout: SpriteLoadout = .default, ownedSpriteItems: [String] = ["spiky_black", "basic_tee_blue", "basic_pants_gray", "sneakers_white"], selectedSkills: [UserSkill] = [], selectedInterests: [UserInterest] = [], selectedCharacter: PlayerCharacterType = .knight) {
+    init(id: String, username: String, avatarName: String, callingCardName: String, totalScore: Int, gold: Int, diamonds: Int, verifiedCount: Int, masterCount: Int, karma: Int, currentStreak: Int, verifiedStreak: Int, stepsToday: Int, stepsThisWeek: Int, handshakeCount: Int, referralCount: Int, warriorRank: Int, explorerRank: Int, mindRank: Int, modSessionsCompleted: Int, modAccuracy: Double, strikes: Int, screenshotStrikes: Int, isSuspended: Bool, modBanUntil: Date? = nil, ownedItems: [String], joinedAt: Date, equippedSkin: String? = nil, equippedCallingCard: String? = nil, equippedEffect: String? = nil, earnedBadges: [String], spriteLoadout: SpriteLoadout = .default, ownedSpriteItems: [String] = ["spiky_black", "basic_tee_blue", "basic_pants_gray", "sneakers_white"], selectedSkills: [UserSkill] = [], selectedInterests: [UserInterest] = [], selectedCharacter: PlayerCharacterType = .knight, ownedSkinPackPieces: [String] = []) {
         self.id = id
         self.username = username
         self.avatarName = avatarName
@@ -97,6 +98,7 @@ nonisolated struct UserProfile: Identifiable, Codable, Sendable {
         self.selectedSkills = selectedSkills
         self.selectedInterests = selectedInterests
         self.selectedCharacter = selectedCharacter
+        self.ownedSkinPackPieces = ownedSkinPackPieces
     }
 }
 
