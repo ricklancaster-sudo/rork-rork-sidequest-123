@@ -122,7 +122,6 @@ const P = new URL(location.href);
 const mode = P.searchParams.get('mode') || 'single';
 const modelName = P.searchParams.get('model') || 'Gunslinger';
 const baseModelName = P.searchParams.get('baseModel') || 'WhiteMale';
-const animationSource = P.searchParams.get('animationSource') || 'Gunslinger';
 const allowsControl = P.searchParams.get('controls') === '1';
 const autoRotate = P.searchParams.get('rotate') === '1';
 const framing = P.searchParams.get('framing') || 'fullBody';
@@ -823,13 +822,6 @@ if (mode === 'modular') {
             loader.load(baseOrigin + '/models/' + encodeURIComponent(sf) + '.glb', res, undefined, rej);
         }));
     });
-    var animSourceNeeded = animationSource && animationSource !== baseModelName && sourceFileList.indexOf(animationSource) === -1;
-    if (animSourceNeeded) {
-        loads.push(new Promise(function(res, rej) {
-            loader.load(baseOrigin + '/models/' + encodeURIComponent(animationSource) + '.glb', res, undefined, rej);
-        }));
-    }
-
     Promise.all(loads).then(function(results) {
         var baseGltf = results[0];
         var clothingGltfs = results.slice(1);
@@ -877,22 +869,16 @@ if (mode === 'modular') {
             if (initConfig[slotKey]) applyEquip(slotKey, initConfig[slotKey]);
         }
 
-        var animSourceClips = [];
-        if (animSourceNeeded) {
-            var animGltf = results[results.length - 1];
-            animSourceClips = animGltf.animations || [];
-        }
         var clothingClips = [];
         clothingGltfs.forEach(function(g) { clothingClips = clothingClips.concat(g.animations); });
         var baseClips = baseGltf.animations || [];
-        var clips = animSourceClips.length > 0 ? animSourceClips : (clothingClips.length > 0 ? clothingClips : baseClips);
-        var animSrc = animSourceClips.length > 0 ? animationSource : (clothingClips.length > 0 ? 'clothing' : 'base');
+        var clips = clothingClips.length > 0 ? clothingClips : baseClips;
         if (clips.length > 0) {
             mixer = new THREE.AnimationMixer(baseScene);
             clips.forEach(function(clip) {
                 mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
             });
-            console.log('[preview] animations (source: ' + animSrc + '):', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
+            console.log('[preview] animations (source: ' + (clothingClips.length > 0 ? 'clothing' : 'base') + '):', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
         }
 
         tick();
