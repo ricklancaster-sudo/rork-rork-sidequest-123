@@ -869,19 +869,37 @@ if (mode === 'modular') {
             if (initConfig[slotKey]) applyEquip(slotKey, initConfig[slotKey]);
         }
 
-        var clothingClips = [];
-        clothingGltfs.forEach(function(g) { clothingClips = clothingClips.concat(g.animations); });
-        var baseClips = baseGltf.animations || [];
-        var clips = clothingClips.length > 0 ? clothingClips : baseClips;
-        if (clips.length > 0) {
-            mixer = new THREE.AnimationMixer(baseScene);
-            clips.forEach(function(clip) {
-                mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
-            });
-            console.log('[preview] animations (source: ' + (clothingClips.length > 0 ? 'clothing' : 'base') + '):', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
-        }
+        var idleAnimURL = baseOrigin + '/models/idle_animation_only.glb';
+        loader.load(idleAnimURL, function(idleGltf) {
+            var idleClips = idleGltf.animations || [];
+            var clothingClips = [];
+            clothingGltfs.forEach(function(g) { clothingClips = clothingClips.concat(g.animations); });
+            var baseClips = baseGltf.animations || [];
+            var clips = idleClips.length > 0 ? idleClips : (clothingClips.length > 0 ? clothingClips : baseClips);
+            var src = idleClips.length > 0 ? 'idle_animation_only' : (clothingClips.length > 0 ? 'clothing' : 'base');
+            if (clips.length > 0) {
+                mixer = new THREE.AnimationMixer(baseScene);
+                clips.forEach(function(clip) {
+                    mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
+                });
+                console.log('[preview] animations (source: ' + src + '):', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
+            }
+            tick();
+        }, undefined, function() {
+            console.warn('[preview] idle_animation_only.glb not found, falling back');
+            var clothingClips = [];
+            clothingGltfs.forEach(function(g) { clothingClips = clothingClips.concat(g.animations); });
+            var baseClips = baseGltf.animations || [];
+            var clips = clothingClips.length > 0 ? clothingClips : baseClips;
+            if (clips.length > 0) {
+                mixer = new THREE.AnimationMixer(baseScene);
+                clips.forEach(function(clip) {
+                    mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
+                });
+            }
+            tick();
+        });
 
-        tick();
         var clothingCounts = {};
         for (var sfk in clothingIndices) clothingCounts[sfk] = Object.keys(clothingIndices[sfk]).length;
         var activeSlots = {};
@@ -910,16 +928,26 @@ if (mode === 'modular') {
         scene.add(model);
         layout(model);
 
-        if (gltf.animations.length > 0) {
-            mixer = new THREE.AnimationMixer(model);
-            gltf.animations.forEach(function(clip) {
-                var a = mixer.clipAction(clip);
-                a.setLoop(THREE.LoopRepeat, Infinity);
-                a.play();
-            });
-        }
-
-        tick();
+        var idleAnimURL2 = baseOrigin + '/models/idle_animation_only.glb';
+        loader.load(idleAnimURL2, function(idleGltf) {
+            var idleClips = idleGltf.animations || [];
+            var clips = idleClips.length > 0 ? idleClips : gltf.animations;
+            if (clips.length > 0) {
+                mixer = new THREE.AnimationMixer(model);
+                clips.forEach(function(clip) {
+                    mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
+                });
+            }
+            tick();
+        }, undefined, function() {
+            if (gltf.animations.length > 0) {
+                mixer = new THREE.AnimationMixer(model);
+                gltf.animations.forEach(function(clip) {
+                    mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
+                });
+            }
+            tick();
+        });
         requestAnimationFrame(function() { notify('ready'); });
     }, undefined, function(err) {
         notify({state:'loadError', error: String(err)});
