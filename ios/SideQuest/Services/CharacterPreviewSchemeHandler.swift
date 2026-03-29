@@ -869,38 +869,34 @@ if (mode === 'modular') {
             if (initConfig[slotKey]) applyEquip(slotKey, initConfig[slotKey]);
         }
 
-        var idleAnimURL = baseOrigin + '/models/idle_animation_only.glb';
-        loader.load(idleAnimURL, function(idleGltf) {
-            var idleClips = idleGltf.animations || [];
-            var clothingClips = [];
-            clothingGltfs.forEach(function(g) { clothingClips = clothingClips.concat(g.animations); });
-            var baseClips = baseGltf.animations || [];
-            var clips = idleClips.length > 0 ? idleClips : (clothingClips.length > 0 ? clothingClips : baseClips);
-            var src = idleClips.length > 0 ? 'idle_animation_only' : (clothingClips.length > 0 ? 'clothing' : 'base');
-            if (clips.length > 0) {
-                mixer = new THREE.AnimationMixer(baseScene);
-                clips.forEach(function(clip) {
-                    mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
-                });
-                console.log('[preview] animations (source: ' + src + '):', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
+        var baseClips = baseGltf.animations || [];
+        var clothingClips = [];
+        clothingGltfs.forEach(function(g) { clothingClips = clothingClips.concat(g.animations || []); });
+        var allClips = baseClips.concat(clothingClips);
+        console.log('[preview] all baked clips:', allClips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
+
+        var idleClip = null;
+        for (var ci = 0; ci < allClips.length; ci++) {
+            var cn = allClips[ci].name.toLowerCase();
+            if (cn === 'idle' || cn === 'idle_human') { idleClip = allClips[ci]; break; }
+        }
+        if (!idleClip) {
+            for (var ci = 0; ci < allClips.length; ci++) {
+                var cn = allClips[ci].name.toLowerCase();
+                if (cn.indexOf('idle') !== -1) { idleClip = allClips[ci]; break; }
             }
-            tick();
-            notifyReady(clips);
-        }, undefined, function() {
-            console.warn('[preview] idle_animation_only.glb not found, falling back');
-            var clothingClips = [];
-            clothingGltfs.forEach(function(g) { clothingClips = clothingClips.concat(g.animations); });
-            var baseClips = baseGltf.animations || [];
-            var clips = clothingClips.length > 0 ? clothingClips : baseClips;
-            if (clips.length > 0) {
-                mixer = new THREE.AnimationMixer(baseScene);
-                clips.forEach(function(clip) {
-                    mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
-                });
-            }
-            tick();
-            notifyReady(clips);
-        });
+        }
+        if (!idleClip && allClips.length > 0) { idleClip = allClips[0]; }
+
+        var playedClips = [];
+        if (idleClip) {
+            mixer = new THREE.AnimationMixer(baseScene);
+            mixer.clipAction(idleClip).setLoop(THREE.LoopRepeat, Infinity).play();
+            playedClips = [idleClip];
+            console.log('[preview] playing idle:', idleClip.name + '(' + idleClip.duration.toFixed(2) + 's)');
+        }
+        tick();
+        notifyReady(playedClips);
 
         function notifyReady(animClips) {
             var clothingCounts = {};
@@ -932,26 +928,28 @@ if (mode === 'modular') {
         scene.add(model);
         layout(model);
 
-        var idleAnimURL2 = baseOrigin + '/models/idle_animation_only.glb';
-        loader.load(idleAnimURL2, function(idleGltf) {
-            var idleClips = idleGltf.animations || [];
-            var clips = idleClips.length > 0 ? idleClips : gltf.animations;
-            if (clips.length > 0) {
-                mixer = new THREE.AnimationMixer(model);
-                clips.forEach(function(clip) {
-                    mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
-                });
+        var singleClips = gltf.animations || [];
+        console.log('[preview] single model clips:', singleClips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
+
+        var singleIdle = null;
+        for (var ci = 0; ci < singleClips.length; ci++) {
+            var cn = singleClips[ci].name.toLowerCase();
+            if (cn === 'idle' || cn === 'idle_human') { singleIdle = singleClips[ci]; break; }
+        }
+        if (!singleIdle) {
+            for (var ci = 0; ci < singleClips.length; ci++) {
+                var cn = singleClips[ci].name.toLowerCase();
+                if (cn.indexOf('idle') !== -1) { singleIdle = singleClips[ci]; break; }
             }
-            tick();
-        }, undefined, function() {
-            if (gltf.animations.length > 0) {
-                mixer = new THREE.AnimationMixer(model);
-                gltf.animations.forEach(function(clip) {
-                    mixer.clipAction(clip).setLoop(THREE.LoopRepeat, Infinity).play();
-                });
-            }
-            tick();
-        });
+        }
+        if (!singleIdle && singleClips.length > 0) { singleIdle = singleClips[0]; }
+
+        if (singleIdle) {
+            mixer = new THREE.AnimationMixer(model);
+            mixer.clipAction(singleIdle).setLoop(THREE.LoopRepeat, Infinity).play();
+            console.log('[preview] playing idle:', singleIdle.name);
+        }
+        tick();
         requestAnimationFrame(function() { notify('ready'); });
     }, undefined, function(err) {
         notify({state:'loadError', error: String(err)});
