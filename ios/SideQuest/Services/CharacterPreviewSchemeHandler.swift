@@ -885,6 +885,7 @@ if (mode === 'modular') {
                 console.log('[preview] animations (source: ' + src + '):', clips.map(function(c) { return c.name + '(' + c.duration.toFixed(2) + 's)'; }));
             }
             tick();
+            notifyReady(clips);
         }, undefined, function() {
             console.warn('[preview] idle_animation_only.glb not found, falling back');
             var clothingClips = [];
@@ -898,22 +899,25 @@ if (mode === 'modular') {
                 });
             }
             tick();
+            notifyReady(clips);
         });
 
-        var clothingCounts = {};
-        for (var sfk in clothingIndices) clothingCounts[sfk] = Object.keys(clothingIndices[sfk]).length;
-        var activeSlots = {};
-        for (var si in slotInstances) activeSlots[si] = slotInstances[si].length;
-        requestAnimationFrame(function() {
-            notify({
-                state:'ready',
-                baseMeshCount: Object.keys(baseIndex).length,
-                clothingMeshCounts: clothingCounts,
-                activeSlots: activeSlots,
-                lookupNotes: lookupNotes,
-                animationClips: clips.map(function(c) { return c.name; })
+        function notifyReady(animClips) {
+            var clothingCounts = {};
+            for (var sfk in clothingIndices) clothingCounts[sfk] = Object.keys(clothingIndices[sfk]).length;
+            var activeSlots = {};
+            for (var si in slotInstances) activeSlots[si] = slotInstances[si].length;
+            requestAnimationFrame(function() {
+                notify({
+                    state:'ready',
+                    baseMeshCount: Object.keys(baseIndex).length,
+                    clothingMeshCounts: clothingCounts,
+                    activeSlots: activeSlots,
+                    lookupNotes: lookupNotes,
+                    animationClips: animClips.map(function(c) { return c.name; })
+                });
             });
-        });
+        }
     }).catch(function(err) {
         console.error('[preview] load error:', err);
         notify({state:'loadError', error: String(err)});
