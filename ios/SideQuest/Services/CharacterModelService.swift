@@ -15,6 +15,7 @@ nonisolated enum CharacterModelService {
 
     static func glbURL(named fileName: String) -> URL? {
         Bundle.main.url(forResource: fileName, withExtension: "glb", subdirectory: "Resources/Characters")
+            ?? Bundle.main.url(forResource: fileName, withExtension: "glb", subdirectory: "Resources")
             ?? Bundle.main.url(forResource: fileName, withExtension: "glb")
     }
 
@@ -24,6 +25,7 @@ nonisolated enum CharacterModelService {
 
     static func usdzURL(named fileName: String) -> URL? {
         Bundle.main.url(forResource: fileName, withExtension: "usdz", subdirectory: "Resources/Characters")
+            ?? Bundle.main.url(forResource: fileName, withExtension: "usdz", subdirectory: "Resources")
             ?? Bundle.main.url(forResource: fileName, withExtension: "usdz")
     }
 }
