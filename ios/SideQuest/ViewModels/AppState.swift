@@ -794,9 +794,10 @@ class AppState {
                     }
                 }
 
-                let snapshotLacksNightlife = resolvedSnapshot.mergedEvents.filter {
+                let nightlifeInSnapshot = resolvedSnapshot.mergedEvents.filter {
                     $0.recordKind == .venueNight || $0.eventType == .partyNightlife
-                }.isEmpty
+                }.count
+                let snapshotLacksNightlife = nightlifeInSnapshot < 6
 
                 if forceRefresh
                     || !SupabaseEventFeedCacheService.isFresh(snapshot: resolvedSnapshot, intent: discoveryIntent)
@@ -852,7 +853,7 @@ class AppState {
             let nightlifeCount = externalEventSnapshot?.mergedEvents.filter {
                 $0.recordKind == .venueNight || $0.eventType == .partyNightlife
             }.count ?? 0
-            guard nightlifeCount == 0 else { return }
+            guard nightlifeCount < 6 else { return }
         }
         scheduleFullExternalEventRefresh(
             searchLocation: searchLocation,
@@ -901,7 +902,7 @@ class AppState {
             let nightlifeCount = localSnapshot.mergedEvents.filter {
                 $0.recordKind == .venueNight || $0.eventType == .partyNightlife
             }.count
-            let needsFullEscalation = nightlifeCount == 0
+            let needsFullEscalation = nightlifeCount < 6
                 && (mode == .preview || mode == .fast)
                 && (intent == .exclusiveHot || intent == .nearbyWorthIt)
 
@@ -1055,7 +1056,8 @@ class AppState {
 
         switch option {
         case .nightlife, .exclusive:
-            if currentSnapshotHasUsefulEvents(for: option) {
+            let hasEnoughNightlife = currentSnapshotNightlifeCount(for: option) >= 6
+            if hasEnoughNightlife {
                 let freshnessWindow = SupabaseEventFeedCacheService.freshnessWindow(
                     for: .exclusiveHot,
                     searchLocation: referenceSearchLocation
@@ -1084,6 +1086,14 @@ class AppState {
         return localizedEvents.contains { event in
             relaxedFilterMatch(event, filter: option) && event.isUpcoming
         }
+    }
+
+    private func currentSnapshotNightlifeCount(for option: ExternalEventFilterOption) -> Int {
+        guard let snapshot = externalEventSnapshot else { return 0 }
+        let localizedEvents = localizedExternalEvents(from: snapshot.mergedEvents)
+        return localizedEvents.filter { event in
+            relaxedFilterMatch(event, filter: option) && event.isUpcoming
+        }.count
     }
 
     private func shouldKeepCurrentExternalEventSnapshot() -> Bool {
