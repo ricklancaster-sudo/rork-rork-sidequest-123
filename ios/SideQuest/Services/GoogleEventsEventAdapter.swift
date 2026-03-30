@@ -396,12 +396,16 @@ nonisolated struct GoogleEventsEventAdapter: ExternalEventSourceAdapter {
                 SearchChannel(label: "tonight sports", queryText: "sports tonight in \(metro)"),
                 SearchChannel(label: "tonight comedy", queryText: "comedy tonight in \(metro)"),
                 SearchChannel(label: "tonight nightlife", queryText: "nightlife tonight in \(nightlifeLocation)"),
+                SearchChannel(label: "tonight clubs", queryText: "club nights tonight in \(nightlifeLocation)"),
+                SearchChannel(label: "tonight dj", queryText: "DJ events tonight in \(nightlifeLocation)"),
                 SearchChannel(label: "tomorrow discovery", queryText: "events tomorrow in \(metro)")
             ]
         case .exclusiveHot:
             return [
                 SearchChannel(label: "tonight nightlife", queryText: "nightlife tonight in \(nightlifeLocation)"),
                 SearchChannel(label: "tonight exclusive", queryText: "exclusive nightlife tonight in \(nightlifeLocation)"),
+                SearchChannel(label: "tonight clubs", queryText: "nightclub events tonight in \(nightlifeLocation)"),
+                SearchChannel(label: "tonight dj", queryText: "DJ events tonight in \(nightlifeLocation)"),
                 SearchChannel(label: "tonight comedy", queryText: "comedy tonight in \(metro)"),
                 SearchChannel(label: "tonight discovery", queryText: "events tonight in \(metro)"),
                 SearchChannel(label: "tomorrow nightlife", queryText: "nightlife tomorrow in \(nightlifeLocation)")
@@ -417,6 +421,7 @@ nonisolated struct GoogleEventsEventAdapter: ExternalEventSourceAdapter {
         case .nearbyWorthIt:
             return [
                 SearchChannel(label: "today discovery", queryText: "events today in \(metro)"),
+                SearchChannel(label: "tonight clubs", queryText: "club nights this week in \(nightlifeLocation)"),
                 SearchChannel(label: "this week comedy", queryText: "comedy shows this week in \(metro)"),
                 SearchChannel(label: "this week community", queryText: "things to do this week in \(metro)"),
                 SearchChannel(label: "this week markets", queryText: "farmers markets this week in \(metro)"),
