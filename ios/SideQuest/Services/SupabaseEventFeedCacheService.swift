@@ -107,6 +107,8 @@ actor SupabaseEventFeedCacheService {
             return nil
         }
 
+        var bestSnapshot: ExternalLocationDiscoverySnapshot?
+
         if let request = makeLoadRequest(searchLocation: searchLocation, intent: intent),
            let rows = await fetchRows(for: request) {
             let candidates = decodeCandidates(from: rows)
@@ -115,8 +117,45 @@ actor SupabaseEventFeedCacheService {
                 searchLocation: searchLocation,
                 intent: intent
             ) {
-                return snapshot
+                if !Self.isInsufficientHighDensityNightlifeSnapshot(
+                    snapshot,
+                    searchLocation: searchLocation,
+                    intent: intent
+                ) {
+                    return snapshot
+                }
+                bestSnapshot = snapshot
             }
+        }
+
+        if let request = makeNearbyBucketLoadRequest(searchLocation: searchLocation, intent: intent),
+           let rows = await fetchRows(for: request),
+           let candidate = Self.bestFallbackCandidate(from: decodeCandidates(from: rows), for: searchLocation) {
+            let sanitizedCandidate = SnapshotLoadCandidate(
+                snapshot: Self.sanitizedSnapshot(candidate.snapshot, intent: intent),
+                quality: candidate.quality,
+                fetchedAt: candidate.fetchedAt,
+                city: candidate.city,
+                state: candidate.state,
+                displayName: candidate.displayName,
+                latitude: candidate.latitude,
+                longitude: candidate.longitude,
+                bucketLatitude: candidate.bucketLatitude,
+                bucketLongitude: candidate.bucketLongitude
+            )
+            let repairedSnapshot = await repairedLoadedSnapshot(
+                sanitizedCandidate.snapshot,
+                searchLocation: searchLocation,
+                intent: intent
+            )
+            if !Self.isInsufficientHighDensityNightlifeSnapshot(
+                repairedSnapshot,
+                searchLocation: searchLocation,
+                intent: intent
+            ) {
+                return repairedSnapshot
+            }
+            bestSnapshot = Self.preferredFallbackSnapshot(bestSnapshot, candidate: repairedSnapshot)
         }
 
         if let request = makeFallbackLoadRequest(searchLocation: searchLocation, intent: intent),
@@ -134,14 +173,22 @@ actor SupabaseEventFeedCacheService {
                 bucketLatitude: candidate.bucketLatitude,
                 bucketLongitude: candidate.bucketLongitude
             )
-            return await repairedLoadedSnapshot(
+            let repairedSnapshot = await repairedLoadedSnapshot(
                 sanitizedCandidate.snapshot,
                 searchLocation: searchLocation,
                 intent: intent
             )
+            if !Self.isInsufficientHighDensityNightlifeSnapshot(
+                repairedSnapshot,
+                searchLocation: searchLocation,
+                intent: intent
+            ) {
+                return repairedSnapshot
+            }
+            bestSnapshot = Self.preferredFallbackSnapshot(bestSnapshot, candidate: repairedSnapshot)
         }
 
-        return nil
+        return bestSnapshot
     }
 
     func save(
@@ -233,6 +280,56 @@ actor SupabaseEventFeedCacheService {
             queryItems.append(URLQueryItem(name: "longitude", value: "lte.\(Self.coordinateString(longitude + radius))"))
         } else {
             queryItems.append(URLQueryItem(name: "display_name", value: "eq.\(searchLocation.displayName)"))
+        }
+
+        components?.queryItems = queryItems
+
+        guard let url = components?.url else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        applyHeaders(to: &request)
+        request.setValue(configuration.schema, forHTTPHeaderField: "Accept-Profile")
+        return request
+    }
+
+    private func makeNearbyBucketLoadRequest(
+        searchLocation: ExternalEventSearchLocation,
+        intent: ExternalDiscoveryIntent
+    ) -> URLRequest? {
+        guard let projectURL = configuration.projectURL else { return nil }
+        let retentionCutoff = Self.postgrestTimestamp(from: Date())
+        let bucket = Self.coordinateBucket(for: searchLocation)
+        guard let bucketLatitude = bucket.latitude,
+              let bucketLongitude = bucket.longitude
+        else {
+            return nil
+        }
+        let bucketWindow = Self.coordinateBucketWindow(for: searchLocation)
+
+        var components = URLComponents(
+            url: projectURL.appendingPathComponent("rest/v1/\(configuration.snapshotTable)"),
+            resolvingAgainstBaseURL: false
+        )
+
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(
+                name: "select",
+                value: "snapshot,fetched_at,expires_at,quality,city,state,display_name,latitude,longitude,bucket_latitude,bucket_longitude"
+            ),
+            URLQueryItem(name: "intent", value: "eq.\(intent.rawValue)"),
+            URLQueryItem(name: "country_code", value: "eq.\(searchLocation.countryCode)"),
+            URLQueryItem(name: "expires_at", value: "gte.\(retentionCutoff)"),
+            URLQueryItem(name: "bucket_latitude", value: "gte.\(Self.coordinateString(bucketLatitude - bucketWindow))"),
+            URLQueryItem(name: "bucket_latitude", value: "lte.\(Self.coordinateString(bucketLatitude + bucketWindow))"),
+            URLQueryItem(name: "bucket_longitude", value: "gte.\(Self.coordinateString(bucketLongitude - bucketWindow))"),
+            URLQueryItem(name: "bucket_longitude", value: "lte.\(Self.coordinateString(bucketLongitude + bucketWindow))"),
+            URLQueryItem(name: "order", value: "quality.desc,fetched_at.desc"),
+            URLQueryItem(name: "limit", value: "16")
+        ]
+
+        if let state = searchLocation.state?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !state.isEmpty {
+            queryItems.append(URLQueryItem(name: "state", value: "eq.\(state)"))
         }
 
         components?.queryItems = queryItems
@@ -542,6 +639,46 @@ actor SupabaseEventFeedCacheService {
     ) -> Bool {
         let age = Date().timeIntervalSince(snapshot.fetchedAt)
         return age <= freshnessWindow(for: intent, searchLocation: snapshot.searchLocation)
+    }
+
+    nonisolated private static func isInsufficientHighDensityNightlifeSnapshot(
+        _ snapshot: ExternalLocationDiscoverySnapshot,
+        searchLocation: ExternalEventSearchLocation,
+        intent: ExternalDiscoveryIntent
+    ) -> Bool {
+        guard intent == .exclusiveHot, isHighDensityMetro(searchLocation) else {
+            return false
+        }
+        return nightlifeEventCount(in: snapshot) < 4
+    }
+
+    nonisolated private static func nightlifeEventCount(in snapshot: ExternalLocationDiscoverySnapshot) -> Int {
+        snapshot.mergedEvents.reduce(into: 0) { count, event in
+            if event.recordKind == .venueNight || event.eventType == .partyNightlife {
+                count += 1
+            }
+        }
+    }
+
+    nonisolated private static func preferredFallbackSnapshot(
+        _ current: ExternalLocationDiscoverySnapshot?,
+        candidate: ExternalLocationDiscoverySnapshot
+    ) -> ExternalLocationDiscoverySnapshot {
+        guard let current else {
+            return candidate
+        }
+
+        let currentNightlifeCount = nightlifeEventCount(in: current)
+        let candidateNightlifeCount = nightlifeEventCount(in: candidate)
+        if candidateNightlifeCount != currentNightlifeCount {
+            return candidateNightlifeCount > currentNightlifeCount ? candidate : current
+        }
+
+        if candidate.mergedEvents.count != current.mergedEvents.count {
+            return candidate.mergedEvents.count > current.mergedEvents.count ? candidate : current
+        }
+
+        return candidate.fetchedAt > current.fetchedAt ? candidate : current
     }
 
     nonisolated private static func isHighDensityMetro(_ searchLocation: ExternalEventSearchLocation) -> Bool {
@@ -968,6 +1105,12 @@ actor SupabaseEventFeedCacheService {
             return String(digits.prefix(5))
         }
         return digits
+    }
+
+    nonisolated private static func coordinateBucketWindow(
+        for searchLocation: ExternalEventSearchLocation
+    ) -> Double {
+        isHighDensityMetro(searchLocation) ? 0.24 : 0.16
     }
 
     nonisolated private static func reviewRepairCoordinateRadius(

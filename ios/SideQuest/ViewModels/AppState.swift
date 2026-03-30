@@ -1312,9 +1312,9 @@ class AppState {
     ) -> Bool {
         guard !snapshot.mergedEvents.isEmpty else { return false }
         switch mode {
-        case .preview:
-            return snapshot.mergedEvents.contains { $0.recordKind == .venueNight || $0.eventType == .partyNightlife }
-        case .fast, .full:
+        case .preview, .fast:
+            return false
+        case .full:
             return true
         }
     }
@@ -3736,7 +3736,6 @@ class AppState {
         guard externalEventSnapshot == nil || (externalEventSnapshot?.mergedEvents.isEmpty ?? true) else { return }
         Self.hasStartedEagerDiscovery = true
         let discoveryService = externalLiveLocationDiscoveryService
-        let cacheService = supabaseEventFeedCacheService
         let pageSize = initialExternalEventPageSize
         Task(priority: .userInitiated) { [weak self] in
             let snapshot = await discoveryService.discover(
@@ -3749,9 +3748,6 @@ class AppState {
             )
             guard !snapshot.mergedEvents.isEmpty else {
                 return
-            }
-            if cacheService.isConfigured {
-                await cacheService.save(snapshot: snapshot, intent: intent, quality: .fast)
             }
             await MainActor.run {
                 guard let self else { return }
