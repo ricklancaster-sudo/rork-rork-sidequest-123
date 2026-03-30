@@ -40,6 +40,12 @@ Big-name clubs (Poppy, Sound, Delilah, etc.) aren't showing up because the Disco
 - [x] Google Events scraper is functional and pushing data
 - [x] Multiple discovery intents (biggestTonight, exclusiveHot, nearbyWorthIt) each include nightlife channels
 
+### 7. Fix refresh state and discovery escalation ✅
+- [x] `isRefreshingExternalEvents` was being set to `false` BEFORE live discovery started — UI showed empty state while scrapers were still running
+- [x] Removed premature flag drop; now stays `true` until live discovery actually completes
+- [x] Added automatic escalation: when preview/fast discovery returns 0 nightlife events, automatically kicks off full discovery with ALL venue adapters (Discotech, Clubbable, Apple Maps, Google Search seeding, h.wood Rolodex)
+- [x] This ensures users see a loading spinner instead of "No nightlife" while scrapers work
+
 ## What stays the same
 - No hardcoded venue names — everything is 100% scrape-driven
 - All existing lighting, camera, and lookdev in the app

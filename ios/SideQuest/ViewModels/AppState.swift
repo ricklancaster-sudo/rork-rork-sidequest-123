@@ -831,8 +831,6 @@ class AppState {
             }
         }
 
-        isRefreshingExternalEvents = false
-
         scheduleLiveDiscoveryInBackground(
             searchLocation: searchLocation,
             forceRefresh: forceRefresh,
@@ -896,6 +894,27 @@ class AppState {
                     if self.shouldPersistDiscoverySnapshot(localSnapshot, mode: mode) {
                         self.persistExternalDiscoverySnapshot(localSnapshot, intent: intent, quality: .fast)
                     }
+                }
+                self.isRefreshingExternalEvents = false
+            }
+
+            let nightlifeCount = localSnapshot.mergedEvents.filter {
+                $0.recordKind == .venueNight || $0.eventType == .partyNightlife
+            }.count
+            let needsFullEscalation = nightlifeCount == 0
+                && (mode == .preview || mode == .fast)
+                && (intent == .exclusiveHot || intent == .nearbyWorthIt)
+
+            if needsFullEscalation {
+                await MainActor.run {
+                    guard refreshGeneration == self.externalEventRefreshGeneration else { return }
+                    self.scheduleFullExternalEventRefresh(
+                        searchLocation: searchLocation,
+                        forceRefresh: true,
+                        refreshGeneration: refreshGeneration,
+                        intent: intent,
+                        filterOption: filterOption
+                    )
                 }
             }
         }
