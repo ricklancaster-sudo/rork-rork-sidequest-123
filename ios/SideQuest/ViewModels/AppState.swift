@@ -3704,12 +3704,21 @@ class AppState {
                 return nil
             }()
             guard var snapshot = await primaryLoad else {
+                if let nightlifeSnapshot = await nightlifeLoad,
+                   !nightlifeSnapshot.mergedEvents.isEmpty {
+                    guard let self else { return }
+                    self.externalEventSearchLocation = searchLocation
+                    self.applyExternalDiscoverySnapshot(nightlifeSnapshot, intent: .exclusiveHot)
+                    self.persistNightlifeSnapshotLocally(nightlifeSnapshot, searchLocation: searchLocation)
+                    return
+                }
                 await MainActor.run {
                     self?.scheduleEagerLiveDiscovery(searchLocation: searchLocation, intent: intent)
                 }
                 return
             }
-            if let nightlifeSupplement = await nightlifeLoad,
+            let nightlifeSupplement = await nightlifeLoad
+            if let nightlifeSupplement,
                !nightlifeSupplement.mergedEvents.isEmpty {
                 let nightlifeEvents = nightlifeSupplement.mergedEvents.filter {
                     $0.recordKind == .venueNight || $0.eventType == .partyNightlife
@@ -3725,6 +3734,22 @@ class AppState {
                 self.externalEventSearchLocation = searchLocation
                 self.applyExternalDiscoverySnapshot(finalSnapshot, intent: intent)
             }
+            if let nightlifeSupplement, !nightlifeSupplement.mergedEvents.isEmpty {
+                self.persistNightlifeSnapshotLocally(nightlifeSupplement, searchLocation: searchLocation)
+            }
+        }
+    }
+
+    private func persistNightlifeSnapshotLocally(
+        _ snapshot: ExternalLocationDiscoverySnapshot,
+        searchLocation: ExternalEventSearchLocation
+    ) {
+        Task(priority: .utility) {
+            PersistenceService.saveExternalDiscoveryState(
+                snapshot: snapshot,
+                intent: .exclusiveHot,
+                searchLocation: searchLocation
+            )
         }
     }
 

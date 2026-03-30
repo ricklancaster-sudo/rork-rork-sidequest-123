@@ -107,8 +107,6 @@ actor SupabaseEventFeedCacheService {
             return nil
         }
 
-        var bestSnapshot: ExternalLocationDiscoverySnapshot?
-
         if let request = makeLoadRequest(searchLocation: searchLocation, intent: intent),
            let rows = await fetchRows(for: request) {
             let candidates = decodeCandidates(from: rows)
@@ -116,15 +114,8 @@ actor SupabaseEventFeedCacheService {
                 from: candidates,
                 searchLocation: searchLocation,
                 intent: intent
-            ) {
-                if !Self.isInsufficientHighDensityNightlifeSnapshot(
-                    snapshot,
-                    searchLocation: searchLocation,
-                    intent: intent
-                ) {
-                    return snapshot
-                }
-                bestSnapshot = snapshot
+            ), !snapshot.mergedEvents.isEmpty {
+                return snapshot
             }
         }
 
@@ -148,14 +139,9 @@ actor SupabaseEventFeedCacheService {
                 searchLocation: searchLocation,
                 intent: intent
             )
-            if !Self.isInsufficientHighDensityNightlifeSnapshot(
-                repairedSnapshot,
-                searchLocation: searchLocation,
-                intent: intent
-            ) {
+            if !repairedSnapshot.mergedEvents.isEmpty {
                 return repairedSnapshot
             }
-            bestSnapshot = Self.preferredFallbackSnapshot(bestSnapshot, candidate: repairedSnapshot)
         }
 
         if let request = makeFallbackLoadRequest(searchLocation: searchLocation, intent: intent),
@@ -178,17 +164,12 @@ actor SupabaseEventFeedCacheService {
                 searchLocation: searchLocation,
                 intent: intent
             )
-            if !Self.isInsufficientHighDensityNightlifeSnapshot(
-                repairedSnapshot,
-                searchLocation: searchLocation,
-                intent: intent
-            ) {
+            if !repairedSnapshot.mergedEvents.isEmpty {
                 return repairedSnapshot
             }
-            bestSnapshot = Self.preferredFallbackSnapshot(bestSnapshot, candidate: repairedSnapshot)
         }
 
-        return bestSnapshot
+        return nil
     }
 
     func save(
