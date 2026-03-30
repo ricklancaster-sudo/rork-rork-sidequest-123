@@ -2663,8 +2663,16 @@ nonisolated struct NightlifeAggregatorVenueAdapter: ExternalVenueSourceAdapter, 
         )
         var endpoints = [marketFetch.endpoint]
         var discovered: [ExternalVenue] = []
-        let mentionExpansionLimit = query.pageSize <= 6 ? 3 : (query.pageSize <= 10 ? 6 : 12)
-        let venuePageLimit = min(max(query.pageSize, 4), query.pageSize <= 6 ? 6 : (query.pageSize <= 10 ? 14 : 32))
+        let mentionExpansionLimit = query.pageSize <= 6 ? 6 : (query.pageSize <= 10 ? 10 : 16)
+        let venuePageLimit = max(16, query.pageSize <= 6 ? 16 : (query.pageSize <= 10 ? 24 : 40))
+
+        let googleSearchNames = await discoverNightlifeVenueNamesViaGoogleSearch(
+            market: market,
+            query: query,
+            session: session
+        )
+        endpoints.append(contentsOf: googleSearchNames.endpoints)
+        var googleSeedSlugs: [String] = googleSearchNames.names.map { slugify($0) }
 
         let marketHTML: String
         if let directHTML = marketFetch.html {
@@ -2674,7 +2682,8 @@ nonisolated struct NightlifeAggregatorVenueAdapter: ExternalVenueSourceAdapter, 
                 market: market,
                 query: query,
                 session: session,
-                venuePageLimit: venuePageLimit
+                venuePageLimit: venuePageLimit,
+                preSeededSlugs: googleSeedSlugs
             )
             return MarketDiscoveryResult(
                 sourceKind: .discotech,
@@ -2791,8 +2800,22 @@ nonisolated struct NightlifeAggregatorVenueAdapter: ExternalVenueSourceAdapter, 
             }
         }
 
+        var googleSeededURLs: [URL] = []
+        let discoveredNames = Set(discovered.map { ExternalEventSupport.normalizeToken($0.name) })
+        let candidateURLStrings = Set(candidateURLs.map(\.absoluteString))
+        for slug in googleSeedSlugs {
+            guard !slug.isEmpty else { continue }
+            guard let url = URL(string: "https://discotech.me/\(market)/\(slug)/") else { continue }
+            guard !candidateURLStrings.contains(url.absoluteString) else { continue }
+            let humanName = ExternalEventSupport.normalizeToken(humanizedVenueName(fromSlug: slug))
+            guard !discoveredNames.contains(humanName) else { continue }
+            googleSeededURLs.append(url)
+        }
+
+        let allVenueURLs = candidateURLs + googleSeededURLs
+
         await withTaskGroup(of: (ExternalEventEndpointResult, ExternalVenue?).self) { group in
-            for candidateURL in candidateURLs.prefix(venuePageLimit) {
+            for candidateURL in allVenueURLs.prefix(venuePageLimit) {
                 group.addTask {
                     let pageFetch = await fetchHTML(
                         url: candidateURL,
@@ -2832,6 +2855,15 @@ nonisolated struct NightlifeAggregatorVenueAdapter: ExternalVenueSourceAdapter, 
             }
         }
 
+        let articleResult = await discoverDiscotechArticleVenues(
+            market: market,
+            query: query,
+            session: session,
+            existingVenues: discovered
+        )
+        endpoints.append(contentsOf: articleResult.endpoints)
+        discovered.append(contentsOf: articleResult.venues)
+
         return MarketDiscoveryResult(sourceKind: .discotech, endpoints: endpoints, venues: discovered)
     }
 
@@ -2839,14 +2871,16 @@ nonisolated struct NightlifeAggregatorVenueAdapter: ExternalVenueSourceAdapter, 
         market: String,
         query: ExternalVenueQuery,
         session: URLSession,
-        venuePageLimit: Int
+        venuePageLimit: Int,
+        preSeededSlugs: [String] = []
     ) async -> MarketDiscoveryResult {
         var endpoints: [ExternalEventEndpointResult] = []
-        var allVenueSlugs: [String] = []
+        var allVenueSlugs: [String] = preSeededSlugs
 
         let fallbackPaths = [
             "/\(market)/guest-lists/",
-            "/\(market)/bottle-service/"
+            "/\(market)/bottle-service/",
+            "/\(market)/nightclubs/"
         ]
 
         for path in fallbackPaths {
@@ -2973,6 +3007,136 @@ nonisolated struct NightlifeAggregatorVenueAdapter: ExternalVenueSourceAdapter, 
         return MarketDiscoveryResult(sourceKind: .discotech, endpoints: endpoints, venues: discovered)
     }
 
+    private func discoverDiscotechArticleVenues(
+        market: String,
+        query: ExternalVenueQuery,
+        session: URLSession,
+        existingVenues: [ExternalVenue]
+    ) async -> (endpoints: [ExternalEventEndpointResult], venues: [ExternalVenue]) {
+        let cityName = query.displayName ?? query.city ?? market.replacingOccurrences(of: "-", with: " ")
+        let slugCity = slugify(cityName)
+        let articleURLStrings = [
+            "https://app.discotech.me/articles/best-nightclubs-in-\(slugCity)",
+            "https://app.discotech.me/articles/best-edm-nightclubs-in-\(slugCity)",
+            "https://app.discotech.me/articles/best-nightclubs-in-hollywood--\(slugCity)",
+            "https://app.discotech.me/articles/best-edm-nightclubs-in-hollywood--\(slugCity)"
+        ]
+
+        var endpoints: [ExternalEventEndpointResult] = []
+        var articleSlugs: [String] = []
+        let existingNames = Set(existingVenues.map { ExternalEventSupport.normalizeToken($0.name) })
+
+        for articleURLString in articleURLStrings {
+            guard let articleURL = URL(string: articleURLString) else { continue }
+            let fetch = await fetchHTML(
+                url: articleURL,
+                label: "Discotech article \(articleURL.lastPathComponent)",
+                session: session,
+                retryCount: 1,
+                perRequestTimeout: 10
+            )
+            endpoints.append(fetch.endpoint)
+            guard let html = fetch.html else { continue }
+
+            let venueURLs = extractDiscotechVenueURLs(from: html, market: market)
+            for url in venueURLs {
+                let slug = url.lastPathComponent.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                if !slug.isEmpty { articleSlugs.append(slug) }
+            }
+
+            let headingNames = allRegexMatches(
+                in: html,
+                pattern: #"<h[23][^>]*>([^<]{3,50})</h[23]>"#,
+                groupCount: 1,
+                options: [.caseInsensitive, .dotMatchesLineSeparators]
+            ).compactMap { ExternalEventSupport.plainText($0.first) }
+            .filter { name in
+                let normalized = ExternalEventSupport.normalizeToken(name)
+                return normalized.count >= 3
+                    && normalized.count <= 35
+                    && !normalized.contains("best")
+                    && !normalized.contains("top")
+                    && !normalized.contains("nightclub")
+                    && !normalized.contains("guide")
+                    && !normalized.contains("article")
+            }
+            for name in headingNames {
+                articleSlugs.append(slugify(name))
+            }
+        }
+
+        var seen = Set<String>()
+        let uniqueSlugs = articleSlugs.compactMap { slug -> String? in
+            let cleaned = slug.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !cleaned.isEmpty,
+                  isLikelyNightlifeVenueSlug(cleaned),
+                  !seen.contains(cleaned),
+                  !existingNames.contains(ExternalEventSupport.normalizeToken(humanizedVenueName(fromSlug: cleaned)))
+            else { return nil }
+            seen.insert(cleaned)
+            return cleaned
+        }
+
+        guard !uniqueSlugs.isEmpty else {
+            return (endpoints, [])
+        }
+
+        var discovered: [ExternalVenue] = []
+        await withTaskGroup(of: (ExternalEventEndpointResult, ExternalVenue?).self) { group in
+            for slug in uniqueSlugs.prefix(20) {
+                group.addTask {
+                    guard let venueURL = URL(string: "https://discotech.me/\(market)/\(slug)/") else {
+                        return (
+                            ExternalEventEndpointResult(
+                                label: "Discotech article venue \(slug)",
+                                requestURL: "https://discotech.me/\(market)/\(slug)/",
+                                responseStatusCode: nil,
+                                worked: false,
+                                note: "Could not build URL."
+                            ),
+                            nil
+                        )
+                    }
+                    let pageFetch = await self.fetchHTML(
+                        url: venueURL,
+                        label: "Discotech article venue \(slug)",
+                        session: session,
+                        retryCount: 1,
+                        perRequestTimeout: 8
+                    )
+                    guard let pageHTML = pageFetch.html else {
+                        return (pageFetch.endpoint, nil)
+                    }
+                    let seed = self.seedVenue(
+                        name: self.humanizedVenueName(fromSlug: slug),
+                        sourceVenueID: "discotech:\(market):\(slug)",
+                        query: query,
+                        discoveryURL: venueURL.absoluteString,
+                        coverageStatus: "Discotech article",
+                        venueType: .nightlifeVenue,
+                        sourceConfidence: 0.65
+                    )
+                    let venue = self.parseDiscotechVenuePage(
+                        html: pageHTML,
+                        url: venueURL,
+                        baseVenue: seed,
+                        query: query
+                    ) ?? seed
+                    return (pageFetch.endpoint, venue)
+                }
+            }
+
+            for await result in group {
+                endpoints.append(result.0)
+                if let venue = result.1 {
+                    discovered.append(venue)
+                }
+            }
+        }
+
+        return (endpoints, discovered)
+    }
+
     private func extractDiscotechFallbackVenueNames(from plainText: String) -> [String] {
         let lines = plainText
             .replacingOccurrences(of: "\n", with: " | ")
@@ -3021,7 +3185,11 @@ nonisolated struct NightlifeAggregatorVenueAdapter: ExternalVenueSourceAdapter, 
         let searchQueries = [
             "best nightclubs in \(cityName)",
             "top clubs in \(cityName)",
-            "popular nightlife venues \(cityName)"
+            "popular nightlife venues \(cityName)",
+            "hottest clubs in \(cityName)",
+            "exclusive nightclubs \(cityName)",
+            "best lounges in \(cityName)",
+            "VIP nightclubs \(cityName)"
         ]
 
         var endpoints: [ExternalEventEndpointResult] = []
@@ -3154,7 +3322,7 @@ nonisolated struct NightlifeAggregatorVenueAdapter: ExternalVenueSourceAdapter, 
 
         var endpoints = [marketFetch.endpoint]
         var discovered: [ExternalVenue] = []
-        let venuePageLimit = min(max(query.pageSize, 4), query.pageSize <= 6 ? 6 : (query.pageSize <= 10 ? 14 : 28))
+        let venuePageLimit = max(16, query.pageSize <= 6 ? 16 : (query.pageSize <= 10 ? 24 : 36))
         let candidateURLs = extractClubbableVenueURLs(from: marketHTML, market: market)
             + extractClubbableJSONLDVenueURLs(from: marketHTML, market: market)
 

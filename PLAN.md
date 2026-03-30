@@ -5,38 +5,40 @@ Big-name clubs (Poppy, Sound, Delilah, etc.) aren't showing up because the Disco
 
 ## What's changing
 
-### 1. Multiple Discotech discovery fallback sources
-- When the main market page (`discotech.me/los-angeles/`) fails, scrape these additional Discotech pages as fallback discovery sources:
+### 1. Multiple Discotech discovery fallback sources ✅
+- [x] When the main market page (`discotech.me/los-angeles/`) fails, scrape these additional Discotech pages as fallback discovery sources:
   - **Guest lists page** (`/los-angeles/guest-lists/`) — lists clubs with active guest lists
   - **Bottle service page** (`/los-angeles/bottle-service/`) — lists clubs with bottle service
-  - **Top clubs articles** (`app.discotech.me/articles/best-*-nightclubs-in-*`) — editorial venue lists
-- Extract venue names and slugs from these pages, then fetch each venue's individual page for full details
-- This ensures big clubs are always discovered even when the main listing page is blocked
+  - **Nightclubs category page** (`/los-angeles/nightclubs/`) — lists clubs by category
+  - **Top clubs articles** (`app.discotech.me/articles/best-*-nightclubs-in-*`) — editorial venue lists (returns 36+ venues incl Poppy, Sound, Delilah)
+- [x] Extract venue names and slugs from these pages, then fetch each venue's individual page for full details
+- [x] This ensures big clubs are always discovered even when the main listing page is blocked
 
-### 2. Google Search-based nightlife venue discovery
-- Add a new discovery channel that scrapes Google Search results for queries like `"best nightclubs in Los Angeles"`, `"top clubs in Los Angeles"`, `"nightlife venues Los Angeles"`
-- Extract venue names from Google search result snippets
-- Use extracted names to seed Discotech/Clubbable individual venue page lookups
-- This is pure scraping — no hardcoded names — and reliably surfaces the biggest, most talked-about venues
+### 2. Google Search-based nightlife venue discovery ✅
+- [x] Google Search discovery now ALWAYS runs in parallel with the market page (not just as fallback)
+- [x] 7 search queries instead of 3: `"best nightclubs"`, `"top clubs"`, `"popular nightlife venues"`, `"hottest clubs"`, `"exclusive nightclubs"`, `"best lounges"`, `"VIP nightclubs"`
+- [x] Extracted names seed Discotech individual venue page lookups
+- [x] Pure scraping — no hardcoded names — reliably surfaces the biggest, most talked-about venues
 
-### 3. Improved Clubbable URL extraction
-- Broaden the regex pattern for extracting venue URLs from Clubbable market pages
-- Add support for both PascalCase and lowercase slug formats
-- Also scrape the Clubbable JSON-LD structured data (`"@type": "NightClub"` blocks) for venue names
+### 3. Improved Clubbable URL extraction ✅
+- [x] Broadened regex pattern for extracting venue URLs from Clubbable market pages (already had multiple patterns)
+- [x] Support for both PascalCase and lowercase slug formats (already existed)
+- [x] JSON-LD structured data scraping (`"@type": "NightClub"` blocks) for venue names (already existed)
 
-### 4. Higher venue page limits
-- Increase Discotech venue page limit from 18 → 32
-- Increase Clubbable venue page limit from 16 → 28
-- This ensures more venues are actually fetched and parsed, not just discovered
+### 4. Higher venue page limits ✅
+- [x] Increase Discotech venue page limit: small queries 6→16, medium 14→24, large 32→40
+- [x] Increase Clubbable venue page limit: small queries 6→16, medium 14→24, large 28→36
+- [x] Increase mention expansion limit: small 3→6, medium 6→10, large 12→16
+- [x] This ensures more venues are actually fetched and parsed, not just discovered
 
-### 5. Apple Maps seed → aggregator enrichment loop
-- When Apple Maps discovers a nightlife venue (e.g., "Poppy" via MKLocalSearch), automatically attempt to find and scrape its Discotech and Clubbable pages
-- This creates a two-way pipeline: Apple Maps finds the venue exists, then aggregators provide the rich nightlife metadata
+### 5. Apple Maps seed → aggregator enrichment loop ✅ (already existed)
+- [x] When Apple Maps discovers a nightlife venue, automatically attempts to find and scrape its Discotech and Clubbable pages
+- [x] Two-way pipeline already in place: Apple Maps finds venues, aggregators provide rich nightlife metadata
 
-### 6. Google Events nightlife search improvements
-- Add dedicated nightlife-focused search channels: `"club nights tonight in {city}"`, `"DJ events tonight in {city}"`, `"nightclub events {city}"`
-- These queries surface more nightlife-specific results alongside the existing concert/event searches
-- The Google Events scraper itself is functional and pushing data — it just needs better nightlife-targeted queries
+### 6. Google Events nightlife search improvements ✅ (already existed)
+- [x] Nightlife-focused search channels already exist: `"nightlife tonight"`, `"club nights tonight"`, `"DJ events tonight"`, `"nightclub events tonight"`, `"exclusive nightlife tonight"`
+- [x] Google Events scraper is functional and pushing data
+- [x] Multiple discovery intents (biggestTonight, exclusiveHot, nearbyWorthIt) each include nightlife channels
 
 ## What stays the same
 - No hardcoded venue names — everything is 100% scrape-driven
