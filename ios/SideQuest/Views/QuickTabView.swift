@@ -598,7 +598,8 @@ struct QuickTabView: View {
                                 modelYawDegrees: appState.profile.selectedCharacter.homeHeroYawDegrees,
                                 sceneStyle: .homeHero,
                                 debugMode: .beauty,
-                                isActive: appState.selectedTab == 0
+                                isActive: appState.selectedTab == 0,
+                                equipment: appState.characterEquipment
                             )
                             .frame(width: 146, height: 184)
                             .allowsHitTesting(false)

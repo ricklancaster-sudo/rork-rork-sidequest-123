@@ -3,10 +3,10 @@ import SwiftUI
 struct OnboardingView: View {
     let appState: AppState
     var isRefresh: Bool = false
-    @State private var step: OnboardingStep = .createProfile
+    @State private var step: OnboardingStep = .welcome
     @State private var showPermissions: Bool = false
+    @State private var displayName: String = ""
     @State private var username: String = ""
-    @State private var selectedAvatar: String = "figure.run"
     @State private var selectedSkills: Set<UserSkill> = []
     @State private var selectedInterests: Set<UserInterest> = []
     @State private var selectedGoals: Set<PlayerGoal> = []
@@ -15,14 +15,9 @@ struct OnboardingView: View {
 
     @State private var usernameError: String = ""
     @State private var isCheckingUsername: Bool = false
+    @State private var welcomeAnimateIn: Bool = false
 
-    private let totalSteps = 5
-
-    private let avatars = [
-        "figure.run", "figure.hiking", "figure.martial.arts",
-        "figure.strengthtraining.traditional", "figure.mind.and.body",
-        "figure.walk", "figure.cooldown", "figure.yoga"
-    ]
+    private let totalSteps = 4
 
     var body: some View {
         ZStack {
@@ -50,14 +45,14 @@ struct OnboardingView: View {
                 .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .opacity))
             } else {
                 switch step {
+                case .welcome:
+                    welcomeContent
                 case .createProfile:
                     createProfileContent
                 case .pickGoals:
                     pickGoalsContent
-                case .pickSkills:
-                    pickSkillsContent
-                case .pickInterests:
-                    pickInterestsContent
+                case .pickVibes:
+                    pickVibesContent
                 case .pickEventPrefs:
                     pickEventPrefsContent
                 }
@@ -71,9 +66,57 @@ struct OnboardingView: View {
                 selectedInterests = Set(appState.profile.selectedInterests)
                 selectedEventTypes = Set(existing.preferredEventTypes)
                 selectedMusicGenres = Set(existing.favoriteMusicGenres)
+                displayName = appState.profile.username
                 username = appState.profile.username
-                selectedAvatar = appState.profile.avatarName
                 step = .pickGoals
+            }
+        }
+    }
+
+    // MARK: - Welcome Screen
+
+    private var welcomeContent: some View {
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 20) {
+                Image(systemName: "shield.checkered")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.linearGradient(colors: [.red, .blue], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .scaleEffect(welcomeAnimateIn ? 1 : 0.5)
+                    .opacity(welcomeAnimateIn ? 1 : 0)
+
+                VStack(spacing: 8) {
+                    Text("SideQuest")
+                        .font(.system(.largeTitle, design: .default, weight: .black))
+                        .foregroundStyle(.white)
+
+                    Text("Your real-world adventure starts here.")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                .opacity(welcomeAnimateIn ? 1 : 0)
+                .offset(y: welcomeAnimateIn ? 0 : 12)
+            }
+
+            Spacer()
+            Spacer()
+
+            Button {
+                withAnimation(.spring(response: 0.4)) { step = .createProfile }
+            } label: {
+                Text("Get Started")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+            .opacity(welcomeAnimateIn ? 1 : 0)
+        }
+        .onAppear {
+            withAnimation(.spring(response: 0.6, dampingFraction: 0.8).delay(0.15)) {
+                welcomeAnimateIn = true
             }
         }
     }
@@ -81,48 +124,67 @@ struct OnboardingView: View {
     // MARK: - Step 1: Create Profile
 
     private var createProfileContent: some View {
-        VStack(spacing: 32) {
+        VStack(spacing: 0) {
             stepHeader(current: 1, total: totalSteps)
+                .padding(.top, 16)
 
-            Text("Create Your Profile")
-                .font(.title.weight(.bold))
-                .foregroundStyle(.white)
+            VStack(spacing: 6) {
+                Text("Who Are You?")
+                    .font(.title.weight(.bold))
+                    .foregroundStyle(.white)
+                Text("Set up your name and unique handle.")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            .padding(.top, 32)
 
             VStack(spacing: 20) {
-                ZStack {
-                    Circle()
-                        .fill(.linearGradient(colors: [.blue, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 80, height: 80)
-                    Image(systemName: selectedAvatar)
-                        .font(.system(size: 36))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Display Name")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .padding(.leading, 4)
+
+                    TextField("Your name", text: $displayName)
+                        .font(.body)
+                        .padding(14)
+                        .background(.white.opacity(0.1), in: .rect(cornerRadius: 12))
                         .foregroundStyle(.white)
+                        .textContentType(.name)
+                        .autocorrectionDisabled()
                 }
 
-                ScrollView(.horizontal) {
-                    HStack(spacing: 12) {
-                        ForEach(avatars, id: \.self) { avatar in
-                            Button {
-                                selectedAvatar = avatar
-                            } label: {
-                                Image(systemName: avatar)
-                                    .font(.title3)
-                                    .foregroundStyle(selectedAvatar == avatar ? .white : .white.opacity(0.4))
-                                    .frame(width: 48, height: 48)
-                                    .background(selectedAvatar == avatar ? .blue : .white.opacity(0.1), in: Circle())
-                            }
-                        }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Username")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .padding(.leading, 4)
+
+                    HStack(spacing: 0) {
+                        Text("@")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.4))
+                            .padding(.leading, 14)
+
+                        TextField("username", text: $username)
+                            .font(.body)
+                            .foregroundStyle(.white)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(.leading, 4)
+                            .padding(.vertical, 14)
+                            .padding(.trailing, 14)
                     }
-                }
-                .contentMargins(.horizontal, 16)
-                .scrollIndicators(.hidden)
-
-                TextField("Username", text: $username)
-                    .font(.body)
-                    .padding(14)
                     .background(.white.opacity(0.1), in: .rect(cornerRadius: 12))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 24)
+
+                    Text("This is your unique @handle — others will find you by it.")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.35))
+                        .padding(.leading, 4)
+                }
             }
+            .padding(.horizontal, 24)
+            .padding(.top, 32)
 
             Spacer()
 
@@ -158,6 +220,23 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             stepHeader(current: 2, total: totalSteps)
                 .padding(.top, 16)
+
+            if !isRefresh {
+                Button {
+                    withAnimation(.spring(response: 0.4)) { step = .createProfile }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.caption.weight(.semibold))
+                        Text("Back")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .foregroundStyle(.white.opacity(0.5))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 4)
+            }
 
             VStack(spacing: 6) {
                 Text("What Are Your Goals?")
@@ -197,7 +276,7 @@ struct OnboardingView: View {
                         .foregroundStyle(.white.opacity(0.6))
                 }
                 Button {
-                    withAnimation(.spring(response: 0.4)) { step = .pickSkills }
+                    withAnimation(.spring(response: 0.4)) { step = .pickVibes }
                 } label: {
                     Text(selectedGoals.isEmpty ? "Skip" : "Next")
                         .font(.headline)
@@ -248,121 +327,107 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 3: Skills
+    // MARK: - Step 3: Skills & Interests (combined)
 
-    private var pickSkillsContent: some View {
+    private var pickVibesContent: some View {
         VStack(spacing: 0) {
             stepHeader(current: 3, total: totalSteps)
                 .padding(.top, 16)
 
-            VStack(spacing: 6) {
-                Text("Choose Your Skills")
-                    .font(.title.weight(.bold))
-                    .foregroundStyle(.white)
-                Text("Select the skills you want to develop.\nThese shape your quest recommendations.")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.6))
-                    .multilineTextAlignment(.center)
-            }
-            .padding(.top, 24)
-            .padding(.horizontal, 24)
-
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    ForEach(UserSkill.allCases) { skill in
-                        tagToggleCard(
-                            title: skill.rawValue,
-                            subtitle: skill.description,
-                            icon: skill.icon,
-                            color: skill.color,
-                            isSelected: selectedSkills.contains(skill)
-                        ) {
-                            withAnimation(.spring(response: 0.3)) {
-                                if selectedSkills.contains(skill) {
-                                    selectedSkills.remove(skill)
-                                } else {
-                                    selectedSkills.insert(skill)
-                                }
-                            }
-                        }
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 24)
-                .padding(.bottom, 24)
-            }
-
-            VStack(spacing: 12) {
-                if !selectedSkills.isEmpty {
-                    Text("\(selectedSkills.count) selected")
+            Button {
+                withAnimation(.spring(response: 0.4)) { step = .pickGoals }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.6))
+                    Text("Back")
+                        .font(.subheadline.weight(.medium))
                 }
-                Button {
-                    withAnimation(.spring(response: 0.4)) { step = .pickInterests }
-                } label: {
-                    Text(selectedSkills.isEmpty ? "Skip" : "Next")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
+                .foregroundStyle(.white.opacity(0.5))
             }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 20)
-        }
-    }
-
-    // MARK: - Step 4: Interests
-
-    private var pickInterestsContent: some View {
-        VStack(spacing: 0) {
-            stepHeader(current: 4, total: totalSteps)
-                .padding(.top, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 4)
 
             VStack(spacing: 6) {
-                Text("Your Interests")
+                Text("Your Vibe")
                     .font(.title.weight(.bold))
                     .foregroundStyle(.white)
-                Text("Pick what excites you.\nWe'll surface quests you'll actually enjoy.")
+                Text("Pick skills and interests that define you.\nThis powers your personalized quest feed.")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.6))
                     .multilineTextAlignment(.center)
             }
-            .padding(.top, 24)
+            .padding(.top, 16)
             .padding(.horizontal, 24)
 
             ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 10) {
-                    ForEach(UserInterest.allCases) { interest in
-                        interestChip(
-                            interest: interest,
-                            isSelected: selectedInterests.contains(interest)
-                        ) {
-                            withAnimation(.spring(response: 0.3)) {
-                                if selectedInterests.contains(interest) {
-                                    selectedInterests.remove(interest)
-                                } else {
-                                    selectedInterests.insert(interest)
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Skills to Level Up")
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(.white)
+
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                            ForEach(UserSkill.allCases) { skill in
+                                tagToggleCard(
+                                    title: skill.rawValue,
+                                    subtitle: skill.description,
+                                    icon: skill.icon,
+                                    color: skill.color,
+                                    isSelected: selectedSkills.contains(skill)
+                                ) {
+                                    withAnimation(.spring(response: 0.3)) {
+                                        if selectedSkills.contains(skill) {
+                                            selectedSkills.remove(skill)
+                                        } else {
+                                            selectedSkills.insert(skill)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Interests")
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(.white)
+
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 10) {
+                            ForEach(UserInterest.allCases) { interest in
+                                interestChip(
+                                    interest: interest,
+                                    isSelected: selectedInterests.contains(interest)
+                                ) {
+                                    withAnimation(.spring(response: 0.3)) {
+                                        if selectedInterests.contains(interest) {
+                                            selectedInterests.remove(interest)
+                                        } else {
+                                            selectedInterests.insert(interest)
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 24)
+                .padding(.top, 20)
                 .padding(.bottom, 24)
             }
 
             VStack(spacing: 12) {
-                if !selectedInterests.isEmpty {
-                    Text("\(selectedInterests.count) selected")
+                let totalVibes = selectedSkills.count + selectedInterests.count
+                if totalVibes > 0 {
+                    Text("\(totalVibes) selected")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.white.opacity(0.6))
                 }
                 Button {
                     withAnimation(.spring(response: 0.4)) { step = .pickEventPrefs }
                 } label: {
-                    Text(selectedInterests.isEmpty ? "Skip" : "Next")
+                    Text(totalVibes == 0 ? "Skip" : "Next")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                 }
@@ -373,12 +438,27 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 5: Event Preferences
+    // MARK: - Step 4: Event Preferences
 
     private var pickEventPrefsContent: some View {
         VStack(spacing: 0) {
-            stepHeader(current: 5, total: totalSteps)
+            stepHeader(current: 4, total: totalSteps)
                 .padding(.top, 16)
+
+            Button {
+                withAnimation(.spring(response: 0.4)) { step = .pickVibes }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                        .font(.caption.weight(.semibold))
+                    Text("Back")
+                        .font(.subheadline.weight(.medium))
+                }
+                .foregroundStyle(.white.opacity(0.5))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 4)
 
             VStack(spacing: 6) {
                 Text("Live Event Preferences")
@@ -500,27 +580,40 @@ struct OnboardingView: View {
     // MARK: - Validation
 
     private func validateAndProceed() async {
-        let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDisplay = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         usernameError = ""
 
-        guard !name.isEmpty else {
+        guard !trimmedDisplay.isEmpty else {
+            usernameError = "Display name is required."
+            return
+        }
+
+        guard !trimmedUsername.isEmpty else {
             usernameError = "Username is required."
             return
         }
 
-        guard name.count >= 3 else {
+        guard trimmedUsername.count >= 3 else {
             usernameError = "Username must be at least 3 characters."
             return
         }
 
-        guard name.range(of: "^[a-zA-Z0-9_]+$", options: .regularExpression) != nil else {
+        guard trimmedUsername.range(of: "^[a-zA-Z0-9_]+$", options: .regularExpression) != nil else {
             usernameError = "Only letters, numbers, and underscores allowed."
             return
         }
 
+        isCheckingUsername = true
+        let isAvailable = await appState.checkUsernameAvailability(trimmedUsername)
         isCheckingUsername = false
 
-        appState.prepareOnboarding(username: name, avatar: selectedAvatar)
+        guard isAvailable else {
+            usernameError = "That username is taken. Try another."
+            return
+        }
+
+        appState.prepareOnboarding(username: trimmedUsername, avatar: "figure.run")
         withAnimation(.spring(response: 0.4)) {
             step = .pickGoals
         }
@@ -677,9 +770,9 @@ struct OnboardingView: View {
 }
 
 nonisolated enum OnboardingStep {
+    case welcome
     case createProfile
     case pickGoals
-    case pickSkills
-    case pickInterests
+    case pickVibes
     case pickEventPrefs
 }

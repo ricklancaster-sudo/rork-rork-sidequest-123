@@ -140,6 +140,8 @@ class AppState {
     private var autoCheckInTickTimer: Timer?
     private var hasConfiguredAutoCheckIn = false
     private var isPerformingAutoCheckInMutation = false
+    private let supabaseProfileService = SupabaseProfileService.shared
+    private var profileSyncTask: Task<Void, Never>?
 
     var todayXPEarned: Int {
         let today = Calendar.current.startOfDay(for: Date())
@@ -176,6 +178,7 @@ class AppState {
             if let uid = auth.currentUserId, profile.id.isEmpty {
                 profile.id = uid
             }
+            pullProfileFromServer()
         }
     }
 
@@ -523,6 +526,14 @@ class AppState {
         profile.avatarName = avatar
         profile.joinedAt = Date()
         saveState()
+        pushProfileToServer()
+    }
+
+    func checkUsernameAvailability(_ username: String) async -> Bool {
+        await supabaseProfileService.checkUsernameAvailable(
+            username,
+            excludingUserId: profile.id.isEmpty ? nil : profile.id
+        )
     }
 
     func saveTagSelections(skills: [UserSkill], interests: [UserInterest]) {
@@ -3520,6 +3531,93 @@ class AppState {
         PersistenceService.saveActiveInstances(activeInstances)
         PersistenceService.saveOpenPlayHistory(openPlayHistory)
         syncWidgetData()
+        debouncedPushProfileToServer()
+    }
+
+    private func debouncedPushProfileToServer() {
+        profileSyncTask?.cancel()
+        profileSyncTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            await self?.pushProfileToServerNow()
+        }
+    }
+
+    func pushProfileToServer() {
+        Task { [weak self] in
+            await self?.pushProfileToServerNow()
+        }
+    }
+
+    private func pushProfileToServerNow() async {
+        guard !profile.id.isEmpty, !profile.username.isEmpty else { return }
+        let equipJSON: String? = {
+            guard let data = try? JSONEncoder().encode(characterEquipment),
+                  let str = String(data: data, encoding: .utf8) else { return nil }
+            return str
+        }()
+        let serverProfile = SupabasePlayerProfile(
+            user_id: profile.id,
+            username: profile.username.lowercased(),
+            display_name: profile.username,
+            avatar_name: profile.avatarName,
+            selected_character: profile.selectedCharacter.rawValue,
+            level: profile.level,
+            total_score: profile.totalScore,
+            gold: profile.gold,
+            diamonds: profile.diamonds,
+            current_streak: profile.currentStreak,
+            verified_count: profile.verifiedCount,
+            warrior_rank: profile.warriorRank,
+            explorer_rank: profile.explorerRank,
+            mind_rank: profile.mindRank,
+            selected_skills: profile.selectedSkills.map(\.rawValue),
+            selected_interests: profile.selectedInterests.map(\.rawValue),
+            goals: onboardingData.goals.map(\.rawValue),
+            equipment_state: equipJSON,
+            owned_items: profile.ownedItems,
+            owned_skin_pack_pieces: profile.ownedSkinPackPieces,
+            earned_badges: profile.earnedBadges,
+            updated_at: nil
+        )
+        _ = await supabaseProfileService.upsertProfile(serverProfile)
+    }
+
+    func pullProfileFromServer() {
+        guard !profile.id.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            guard let serverProfile = await supabaseProfileService.fetchProfile(userId: profile.id) else { return }
+            await MainActor.run {
+                if serverProfile.total_score > self.profile.totalScore {
+                    self.profile.totalScore = serverProfile.total_score
+                }
+                if serverProfile.gold > self.profile.gold {
+                    self.profile.gold = serverProfile.gold
+                }
+                if serverProfile.diamonds > self.profile.diamonds {
+                    self.profile.diamonds = serverProfile.diamonds
+                }
+                if serverProfile.current_streak > self.profile.currentStreak {
+                    self.profile.currentStreak = serverProfile.current_streak
+                }
+                if serverProfile.verified_count > self.profile.verifiedCount {
+                    self.profile.verifiedCount = serverProfile.verified_count
+                }
+                if !serverProfile.username.isEmpty, self.profile.username.isEmpty {
+                    self.profile.username = serverProfile.username
+                }
+                if let equipJSON = serverProfile.equipment_state,
+                   !equipJSON.isEmpty,
+                   let data = equipJSON.data(using: .utf8),
+                   let state = try? JSONDecoder().decode(CharacterEquipmentState.self, from: data) {
+                    if self.characterEquipment == .fullCowboy || self.characterEquipment == .naked {
+                        self.characterEquipment = state
+                    }
+                }
+                PersistenceService.saveProfile(self.profile)
+            }
+        }
     }
 
     func syncWidgetData() {
