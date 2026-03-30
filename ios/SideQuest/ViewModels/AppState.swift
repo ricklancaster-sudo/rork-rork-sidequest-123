@@ -126,13 +126,14 @@ class AppState {
     private var externalEventSnapshotIntent: ExternalDiscoveryIntent?
     private var externalEventImagePrefetchTask: Task<Void, Never>?
     private var externalEventFeedRebuildTask: Task<Void, Never>?
-    private var externalDiscoveryRestoreTask: Task<Void, Never>?
+
     private static var hasStartedPrewarm: Bool = false
     private static var hasStartedEagerDiscovery: Bool = false
     private static var hasStartedRestore: Bool = false
     private var hasCalledStartUp: Bool = false
     var externalEventImageRefreshNonce: Int = 0
     private let persistedExternalDiscoveryMaxAge: TimeInterval = 60 * 60 * 24
+    private let staleButDisplayableMaxAge: TimeInterval = 60 * 60 * 72
     private let externalEventService = ExternalEventIngestionService(configuration: .sideQuestPrototype())
     private let externalLiveLocationDiscoveryService = ExternalLiveLocationDiscoveryService(configuration: .sideQuestPrototype())
     private let supabaseEventFeedCacheService = SupabaseEventFeedCacheService(configuration: .fromEnvironment())
@@ -185,7 +186,7 @@ class AppState {
     func startExternalEventPipeline() {
         guard !hasCalledStartUp else { return }
         hasCalledStartUp = true
-        restorePersistedExternalDiscoveryState()
+        restorePersistedExternalDiscoveryStateSynchronously()
         prewarmExternalEventsFromSupabase()
     }
 
@@ -716,12 +717,12 @@ class AppState {
             return
         }
 
-        let localPersistedMaxAge = persistedExternalDiscoveryMaxAge
+        let localDisplayableMaxAge = staleButDisplayableMaxAge
         if let persisted = await Task.detached(priority: .userInitiated, operation: {
             PersistenceService.loadExternalDiscoveryState(intent: discoveryIntent)
         }).value,
            persisted.intent == discoveryIntent,
-           Date().timeIntervalSince(persisted.savedAt) <= localPersistedMaxAge {
+           Date().timeIntervalSince(persisted.savedAt) <= localDisplayableMaxAge {
             let spoofPostalCode = externalEventSpoofPostalCode
             let postalCodeMatches = spoofPostalCode.isEmpty
                 || persisted.searchLocation.postalCode == spoofPostalCode
@@ -828,7 +829,7 @@ class AppState {
         if let fallbackPersisted = await Task.detached(priority: .userInitiated, operation: {
             for fallbackIntent in ExternalDiscoveryIntent.allCases where fallbackIntent != discoveryIntent {
                 if let p = PersistenceService.loadExternalDiscoveryState(intent: fallbackIntent),
-                   Date().timeIntervalSince(p.savedAt) <= localPersistedMaxAge,
+                   Date().timeIntervalSince(p.savedAt) <= localDisplayableMaxAge,
                    !p.snapshot.mergedEvents.isEmpty {
                     return p
                 }
@@ -3720,10 +3721,10 @@ class AppState {
             }
             let finalSnapshot = snapshot
             guard let self else { return }
-            guard self.externalEventSnapshot == nil
-                || (self.externalEventSnapshot?.mergedEvents.isEmpty ?? true) else { return }
-            self.externalEventSearchLocation = searchLocation
-            self.applyExternalDiscoverySnapshot(finalSnapshot, intent: intent)
+            if self.shouldApplyCachedDiscoverySnapshot(finalSnapshot) {
+                self.externalEventSearchLocation = searchLocation
+                self.applyExternalDiscoverySnapshot(finalSnapshot, intent: intent)
+            }
         }
     }
 
@@ -3764,41 +3765,34 @@ class AppState {
         }
     }
 
-    private func restorePersistedExternalDiscoveryState() {
+    private func restorePersistedExternalDiscoveryStateSynchronously() {
         guard !Self.hasStartedRestore else { return }
         Self.hasStartedRestore = true
         let intent = currentExternalDiscoveryIntent
         let spoofPostalCode = externalEventSpoofPostalCode
-        let maxAge = persistedExternalDiscoveryMaxAge
-        externalDiscoveryRestoreTask?.cancel()
-        externalDiscoveryRestoreTask = Task.detached(priority: .userInitiated) { [weak self] in
-            guard let persisted = PersistenceService.loadExternalDiscoveryState(intent: intent) else {
-                return
-            }
-            guard !Task.isCancelled else { return }
-            guard Date().timeIntervalSince(persisted.savedAt) <= maxAge else {
-                return
-            }
 
-            if !spoofPostalCode.isEmpty,
-               let postalCode = persisted.searchLocation.postalCode,
-               postalCode != spoofPostalCode {
-                return
-            }
-
-            let sanitizedSnapshot = Self.sanitizedExternalDiscoverySnapshot(persisted.snapshot)
-            await MainActor.run {
-                guard let self else { return }
-                guard self.externalEventSnapshot == nil else { return }
-                guard self.currentExternalDiscoveryIntent == persisted.intent else { return }
-                self.externalEventSearchLocation = persisted.searchLocation
-                self.applyExternalDiscoverySnapshot(sanitizedSnapshot, intent: persisted.intent)
-                self.schedulePersistedExternalDiscoveryCacheReconciliation(
-                    searchLocation: persisted.searchLocation,
-                    intent: persisted.intent
-                )
-            }
+        guard let persisted = PersistenceService.loadExternalDiscoveryState(intent: intent) else {
+            return
         }
+        guard Date().timeIntervalSince(persisted.savedAt) <= staleButDisplayableMaxAge else {
+            return
+        }
+
+        if !spoofPostalCode.isEmpty,
+           let postalCode = persisted.searchLocation.postalCode,
+           postalCode != spoofPostalCode {
+            return
+        }
+
+        let sanitizedSnapshot = Self.sanitizedExternalDiscoverySnapshot(persisted.snapshot)
+        guard externalEventSnapshot == nil else { return }
+        guard currentExternalDiscoveryIntent == persisted.intent else { return }
+        externalEventSearchLocation = persisted.searchLocation
+        applyExternalDiscoverySnapshot(sanitizedSnapshot, intent: persisted.intent)
+        schedulePersistedExternalDiscoveryCacheReconciliation(
+            searchLocation: persisted.searchLocation,
+            intent: persisted.intent
+        )
     }
 
     @MainActor
