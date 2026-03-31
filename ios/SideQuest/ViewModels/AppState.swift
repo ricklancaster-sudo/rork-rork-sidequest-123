@@ -822,20 +822,11 @@ class AppState {
                     }
                 }
 
-                let nightlifeInSnapshot = resolvedSnapshot.mergedEvents.filter {
-                    $0.recordKind == .venueNight || $0.eventType == .partyNightlife
-                }.count
-                let snapshotLacksNightlife = nightlifeInSnapshot < 6
-
                 if forceRefresh
-                    || !SupabaseEventFeedCacheService.isFresh(snapshot: resolvedSnapshot, intent: discoveryIntent)
-                    || snapshotLacksNightlife {
-                    scheduleBackgroundRefresh(
+                    || !SupabaseEventFeedCacheService.isFresh(snapshot: resolvedSnapshot, intent: discoveryIntent) {
+                    requestServerScrapeIfNeeded(
                         searchLocation: searchLocation,
-                        forceRefresh: true,
-                        refreshGeneration: refreshGeneration,
-                        intent: discoveryIntent,
-                        filterOption: externalEventFilterOption
+                        intent: discoveryIntent
                     )
                 }
                 return
@@ -891,18 +882,9 @@ class AppState {
         intent: ExternalDiscoveryIntent,
         filterOption: ExternalEventFilterOption
     ) {
-        if !forceRefresh {
-            let nightlifeCount = externalEventSnapshot?.mergedEvents.filter {
-                $0.recordKind == .venueNight || $0.eventType == .partyNightlife
-            }.count ?? 0
-            guard nightlifeCount < 6 else { return }
-        }
-        scheduleFullExternalEventRefresh(
+        requestServerScrapeIfNeeded(
             searchLocation: searchLocation,
-            forceRefresh: forceRefresh,
-            refreshGeneration: refreshGeneration,
-            intent: intent,
-            filterOption: filterOption
+            intent: intent
         )
     }
 
@@ -919,30 +901,12 @@ class AppState {
         Task { [weak self] in
             guard let self else { return }
 
-            if !skipFastPhase && (mode == .preview || mode == .full) {
-                let fastSnapshot = await self.externalLiveLocationDiscoveryService.discover(
-                    searchLocation: searchLocation,
-                    forceRefresh: forceRefresh,
-                    pageSize: capturedPageSize,
-                    sourcePageDepth: 1,
-                    mode: .fast,
-                    intent: intent
-                )
-                await MainActor.run {
-                    guard refreshGeneration == self.externalEventRefreshGeneration else { return }
-                    if !fastSnapshot.mergedEvents.isEmpty {
-                        self.applyExternalDiscoverySnapshot(fastSnapshot, intent: intent)
-                    }
-                    self.isRefreshingExternalEvents = false
-                }
-            }
-
             let localSnapshot = await self.externalLiveLocationDiscoveryService.discover(
                 searchLocation: searchLocation,
                 forceRefresh: forceRefresh,
                 pageSize: capturedPageSize,
                 sourcePageDepth: 1,
-                mode: mode,
+                mode: .fast,
                 intent: intent
             )
             let displayLocalSnapshot = await self.displaySnapshot(
@@ -955,34 +919,17 @@ class AppState {
                 guard refreshGeneration == self.externalEventRefreshGeneration else { return }
                 if self.shouldApplyQuickDiscoverySnapshot(displayLocalSnapshot) {
                     self.applyExternalDiscoverySnapshot(displayLocalSnapshot, intent: intent)
-                    if self.shouldPersistDiscoverySnapshot(localSnapshot, mode: mode) {
+                    if self.shouldPersistDiscoverySnapshot(localSnapshot, mode: .fast) {
                         self.persistExternalDiscoverySnapshot(localSnapshot, intent: intent, quality: .fast)
                     }
                 }
-                if mode == .fast {
-                    self.isRefreshingExternalEvents = false
-                }
+                self.isRefreshingExternalEvents = false
             }
 
-            let nightlifeCount = localSnapshot.mergedEvents.filter {
-                $0.recordKind == .venueNight || $0.eventType == .partyNightlife
-            }.count
-            let needsFullEscalation = nightlifeCount < 6
-                && (mode == .preview || mode == .fast)
-                && (intent == .exclusiveHot || intent == .nearbyWorthIt)
-
-            if needsFullEscalation {
-                await MainActor.run {
-                    guard refreshGeneration == self.externalEventRefreshGeneration else { return }
-                    self.scheduleFullExternalEventRefresh(
-                        searchLocation: searchLocation,
-                        forceRefresh: true,
-                        refreshGeneration: refreshGeneration,
-                        intent: intent,
-                        filterOption: filterOption
-                    )
-                }
-            }
+            self.requestServerScrapeIfNeeded(
+                searchLocation: searchLocation,
+                intent: intent
+            )
         }
     }
 
@@ -1082,14 +1029,7 @@ class AppState {
     }
 
     private var initialExternalDiscoveryMode: ExternalLiveLocationDiscoveryService.DiscoveryMode {
-        switch externalEventFilterOption {
-        case .nightlife, .exclusive:
-            return .preview
-        case .all:
-            return .preview
-        case .today, .tonight, .tomorrow, .sports, .concerts, .races, .community, .weekend, .free:
-            return .fast
-        }
+        .fast
     }
 
     private var initialExternalEventPageSize: Int {
@@ -1568,51 +1508,21 @@ class AppState {
         intent: ExternalDiscoveryIntent,
         filterOption: ExternalEventFilterOption
     ) {
-        Task { [weak self] in
-            guard let self else { return }
-            var fullSnapshot = await self.externalLiveLocationDiscoveryService.discover(
+        requestServerScrapeIfNeeded(
+            searchLocation: searchLocation,
+            intent: intent
+        )
+    }
+
+    private func requestServerScrapeIfNeeded(
+        searchLocation: ExternalEventSearchLocation,
+        intent: ExternalDiscoveryIntent
+    ) {
+        Task {
+            await FlyioScraperTriggerService.shared.triggerRefreshIfNeeded(
                 searchLocation: searchLocation,
-                forceRefresh: forceRefresh,
-                pageSize: max(self.initialExternalEventPageSize, 20),
-                sourcePageDepth: self.externalEventSourcePageDepth,
-                mode: .full,
                 intent: intent
             )
-
-            let displaySnapshot = await self.displaySnapshot(
-                from: fullSnapshot,
-                searchLocation: searchLocation,
-                primaryIntent: intent,
-                filterOption: filterOption
-            )
-            let shouldApply = await MainActor.run {
-                self.shouldApplyFullDiscoverySnapshot(displaySnapshot, intent: intent)
-            }
-            guard shouldApply else { return }
-            let hasValidContent = !fullSnapshot.mergedEvents.isEmpty
-            if hasValidContent {
-                await self.supabaseEventFeedCacheService.save(
-                    snapshot: fullSnapshot,
-                    intent: intent,
-                    quality: .full
-                )
-                if intent == .nearbyWorthIt {
-                    let nightlifeCount = fullSnapshot.mergedEvents.filter {
-                        $0.recordKind == .venueNight || $0.eventType == .partyNightlife
-                    }.count
-                    if nightlifeCount >= 2 {
-                        await self.supabaseEventFeedCacheService.save(
-                            snapshot: fullSnapshot,
-                            intent: .exclusiveHot,
-                            quality: .full
-                        )
-                    }
-                }
-            }
-            await MainActor.run {
-                guard refreshGeneration == self.externalEventRefreshGeneration else { return }
-                self.applyExternalDiscoverySnapshot(displaySnapshot, intent: intent)
-            }
         }
     }
 

@@ -179,37 +179,35 @@ curl -X POST https://sidequest-ingestion-worker.fly.dev/api/trigger-backfill \
                     ┌──────────────────────┐
                     │      iOS App         │
                     │                      │
-                    │  PRIMARY PATH:       │
-                    │  SupabaseEventFeed   │
-                    │  CacheService reads  │
-                    │  server snapshots    │
+                    │  Supabase cache read │
+                    │  (instant nightlife) │
                     │                      │
-                    │  FALLBACK PATH:      │
-                    │  On-device scraping  │
-                    │  (same sources +     │
-                    │   Apple Maps media)  │
+                    │  Ticketmaster/etc    │
+                    │  API calls (fast)    │
+                    │                      │
+                    │  Fly.io trigger      │
+                    │  (fire-and-forget    │
+                    │   when cache stale)  │
                     └──────────────────────┘
 ```
 
-### iOS Primary Path (fast)
-1. `SupabaseEventFeedCacheService` queries `external_event_snapshots` by lat/lng bucket + intent
-2. If a valid (non-expired) snapshot exists → instant display
-3. No scraping needed — server already did it
+### iOS Path (as of 2026-03-30 — NO device-side scraping)
+1. Restore from local disk cache (instant if available from prior session)
+2. `SupabaseEventFeedCacheService` queries `external_event_snapshots` by lat/lng bucket + intent
+3. If a valid (non-expired) snapshot exists → instant display (nightlife + Ticketmaster + everything)
+4. Concurrently, `ExternalEventIngestionService` fetches Ticketmaster/Google Events/Eventbrite/RunSignup APIs (fast JSON, 2-3s)
+5. If Supabase cache is stale or missing, `FlyioScraperTriggerService` POSTs to Fly.io `/api/trigger-refresh` (fire-and-forget)
+6. **NO device-side HTML scraping** — no Discotech, no Clubbable, no Google Reviews, no venue website scraping, no Apple Maps enrichment
+7. All nightlife data comes exclusively from Supabase (populated by Fly.io server)
 
-### iOS Fallback Path (slow, when server data is missing/stale)
-1. `ExternalEventIngestionService` runs Ticketmaster, Eventbrite, Google Events adapters
-2. `ExternalVenueDiscoveryService` runs `NightlifeAggregatorVenueAdapter` (Discotech + Clubbable + HWood scraping) and `AppleMapsVenueAdapter`
-3. Apple Maps Look Around snapshots for venue images (can't run server-side)
-4. Results cached locally + upserted to Supabase for future server pickup
+### What runs on-device
+- Ticketmaster, Eventbrite, RunSignup, Google Events **API calls** (structured JSON, fast)
+- Reading from Supabase cache
+- Fire-and-forget trigger to Fly.io when cache is stale
 
-### What ONLY runs on-device (never server-side)
-- Apple Maps venue search and Look Around image capture
-- Apple Maps media enrichment (MKLookAroundSnapshotter)
-- Official venue website scraping
-- Reservation provider scraping (OpenTable, Resy, SevenRooms, Tablelist)
-
-### What ONLY runs server-side
-- Google Reviews HTML scraping (too slow for on-device)
+### What ONLY runs server-side (Fly.io)
+- ALL HTML scraping: Discotech, Clubbable, HWood Rolodex, Google Reviews
+- Nightlife venue discovery and enrichment
 - Scheduled refresh orchestration (cron-like metro polling)
 - Review poison detection and cross-validation
 - Coverage metrics and source health tracking

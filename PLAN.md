@@ -46,9 +46,21 @@ Big-name clubs (Poppy, Sound, Delilah, etc.) aren't showing up because the Disco
 - [x] Added automatic escalation: when preview/fast discovery returns 0 nightlife events, automatically kicks off full discovery with ALL venue adapters (Discotech, Clubbable, Apple Maps, Google Search seeding, h.wood Rolodex)
 - [x] This ensures users see a loading spinner instead of "No nightlife" while scrapers work
 
+### 8. Remove ALL device-side scraping — server-only architecture ✅
+- [x] Removed ALL HTML scraping from iOS app (Discotech, Clubbable, HWood, Google Reviews, venue websites, reservation providers)
+- [x] Removed venue discovery (`ExternalVenueDiscoveryService`) from `ExternalLiveLocationDiscoveryService.discover()` — all modes now API-only
+- [x] Removed Google review enrichment and source page image enrichment from device
+- [x] Removed "full escalation" that triggered 30-60s device-side scraping when nightlife count was low
+- [x] All discovery modes now equivalent to `.fast` — only Ticketmaster, Eventbrite, RunSignup, Google Events API calls (2-3 seconds)
+- [x] Created `FlyioScraperTriggerService` — fire-and-forget POST to `https://sidequest-ingestion-worker.fly.dev/api/trigger-refresh` when Supabase cache is stale
+- [x] Nightlife data now comes EXCLUSIVELY from Supabase cache (populated by Fly.io server scraper)
+- [x] Nightlife loads at the same speed as Ticketmaster events — instant from Supabase cache
+- [x] Updated `SERVER_INFRASTRUCTURE.md` to reflect new architecture
+
 ## What stays the same
-- No hardcoded venue names — everything is 100% scrape-driven
+- No hardcoded venue names — everything is 100% scrape-driven (server-side)
 - All existing lighting, camera, and lookdev in the app
-- Ticketmaster, Eventbrite, RunSignup, and StubHub scrapers unchanged
-- All existing venue enrichment (Apple Maps media, official website, reservation providers)
+- Ticketmaster, Eventbrite, RunSignup API calls still run on-device (fast structured JSON)
 - Existing cache, dedup, and merge logic
+- Supabase read path unchanged
+- Fly.io server scraper unchanged (still does all the heavy scraping)

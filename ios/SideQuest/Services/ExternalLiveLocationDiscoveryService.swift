@@ -84,14 +84,7 @@ actor ExternalLiveLocationDiscoveryService {
         intent: ExternalDiscoveryIntent = .nearbyWorthIt
     ) async -> ExternalLocationDiscoverySnapshot {
         let profiles = radiusProfiles(for: searchLocation, mode: mode, intent: intent)
-        let allowedSources: Set<ExternalEventSource>? = switch mode {
-        case .fast:
-            ExternalEventIngestionService.fastPrimarySources(configuration: configuration)
-        case .preview:
-            ExternalEventIngestionService.fastPrimarySources(configuration: configuration)
-        case .full:
-            nil
-        }
+        let allowedSources: Set<ExternalEventSource>? = nil
         guard let latitude = searchLocation.latitude, let longitude = searchLocation.longitude else {
             let query = ExternalEventQuery(
                 countryCode: searchLocation.countryCode,
@@ -117,20 +110,13 @@ actor ExternalLiveLocationDiscoveryService {
                 forceRefresh: forceRefresh,
                 allowedSources: allowedSources
             )
-            let venueNightEvents = Self.supplementalVenueNightEvents(from: [], around: searchLocation)
-            let combinedEvents = ExternalEventIngestionService.dedupe(events: snapshot.mergedEvents + venueNightEvents)
+            let combinedEvents = ExternalEventIngestionService.dedupe(events: snapshot.mergedEvents)
             let enrichedEvents = Self.enrich(
                 events: combinedEvents.events,
                 with: [],
                 around: searchLocation
             )
-            let finalEvents: [ExternalEvent]
-            if mode == .fast {
-                finalEvents = enrichedEvents
-            } else {
-                let reviewEnrichedEvents = await enrichGoogleLocalReviews(in: enrichedEvents)
-                finalEvents = await enrichMissingEventImages(in: reviewEnrichedEvents)
-            }
+            let finalEvents = enrichedEvents
             let eventSnapshot = ExternalEventIngestionSnapshot(
                 fetchedAt: snapshot.fetchedAt,
                 query: snapshot.query,
@@ -189,81 +175,38 @@ actor ExternalLiveLocationDiscoveryService {
                 pageSize: mode == .preview ? 6 : 24
             )
 
-            async let eventSnapshotPass = eventService.fetchAll(
+            let eventSnapshotResolved = await eventService.fetchAll(
                 query: eventQuery,
                 forceRefresh: forceRefresh,
                 allowedSources: allowedSources
             )
 
-            let venueSnapshotResolved: ExternalVenueDiscoverySnapshot?
-            switch mode {
-            case .fast:
-                venueSnapshotResolved = nil
-            case .preview:
-                venueSnapshotResolved = await venueService.discoverVenues(
-                    query: venueQuery,
-                    forceRefresh: forceRefresh,
-                    mode: .baseOnly
-                )
-            case .full:
-                venueSnapshotResolved = await venueService.discoverVenues(
-                    query: venueQuery,
-                    forceRefresh: forceRefresh,
-                    mode: .full
-                )
-            }
-            let eventSnapshotResolved = await eventSnapshotPass
-
-            if let venueSnapshotResolved {
-                mergedVenueResults = Self.mergeVenueResults(existing: mergedVenueResults, incoming: venueSnapshotResolved.sourceResults)
-            }
             mergedEventResults = Self.mergeEventResults(existing: mergedEventResults, incoming: eventSnapshotResolved.sourceResults)
             appliedProfiles.append(profile)
             finalQuery = eventQuery
 
-            let rawVenues = ExternalVenueDiscoveryService.merge(mergedVenueResults.flatMap(\.venues))
-            let canonicalVenues: [ExternalVenue]
-            if mode == .fast {
-                canonicalVenues = rawVenues
-            } else {
-                canonicalVenues = await enrichGoogleLocalReviews(in: rawVenues)
-            }
             let deduped = ExternalEventIngestionService.dedupe(events: mergedEventResults.flatMap(\.events))
-            let venueNightEvents = Self.supplementalVenueNightEvents(from: canonicalVenues, around: searchLocation)
-            let combinedEvents = ExternalEventIngestionService.dedupe(events: deduped.events + venueNightEvents)
             let enrichedEvents = Self.enrich(
-                events: combinedEvents.events,
-                with: canonicalVenues,
+                events: deduped.events,
+                with: [],
                 around: searchLocation
             )
 
-            if shouldStopExpanding(events: enrichedEvents, venues: canonicalVenues, profile: profile, appliedProfiles: appliedProfiles) {
-                let imageEnrichedEvents: [ExternalEvent]
-                if mode == .fast {
-                    imageEnrichedEvents = enrichedEvents
-                } else {
-                    let reviewEnrichedEvents = await enrichGoogleLocalReviews(in: enrichedEvents)
-                    imageEnrichedEvents = await enrichMissingEventImages(in: reviewEnrichedEvents)
-                }
+            if shouldStopExpanding(events: enrichedEvents, venues: [], profile: profile, appliedProfiles: appliedProfiles) {
                 let eventSnapshot = ExternalEventIngestionSnapshot(
                     fetchedAt: Date(),
                     query: finalQuery ?? eventQuery,
                     sourceResults: mergedEventResults,
-                    mergedEvents: imageEnrichedEvents,
-                    dedupeGroups: deduped.groups + combinedEvents.groups
+                    mergedEvents: enrichedEvents,
+                    dedupeGroups: deduped.groups
                 )
                 return ExternalLocationDiscoverySnapshot(
                     fetchedAt: Date(),
                     searchLocation: searchLocation,
                     appliedProfiles: appliedProfiles,
-                    venueSnapshot: mode == .fast ? nil : ExternalVenueDiscoverySnapshot(
-                        fetchedAt: Date(),
-                        query: venueQuery,
-                        sourceResults: mergedVenueResults,
-                        venues: canonicalVenues
-                    ),
+                    venueSnapshot: nil,
                     eventSnapshot: eventSnapshot,
-                    mergedEvents: imageEnrichedEvents,
+                    mergedEvents: enrichedEvents,
                     notes: notes
                 )
             }
@@ -275,24 +218,8 @@ actor ExternalLiveLocationDiscoveryService {
             }
         }
 
-        let rawVenuesFinal = ExternalVenueDiscoveryService.merge(mergedVenueResults.flatMap(\.venues))
-        let canonicalVenues: [ExternalVenue]
-        if mode == .fast {
-            canonicalVenues = rawVenuesFinal
-        } else {
-            canonicalVenues = await enrichGoogleLocalReviews(in: rawVenuesFinal)
-        }
         let deduped = ExternalEventIngestionService.dedupe(events: mergedEventResults.flatMap(\.events))
-        let venueNightEvents = Self.supplementalVenueNightEvents(from: canonicalVenues, around: searchLocation)
-        let combinedEvents = ExternalEventIngestionService.dedupe(events: deduped.events + venueNightEvents)
-        let enrichedEvents = Self.enrich(events: combinedEvents.events, with: canonicalVenues, around: searchLocation)
-        let imageEnrichedEvents: [ExternalEvent]
-        if mode == .fast {
-            imageEnrichedEvents = enrichedEvents
-        } else {
-            let reviewEnrichedEvents = await enrichGoogleLocalReviews(in: enrichedEvents)
-            imageEnrichedEvents = await enrichMissingEventImages(in: reviewEnrichedEvents)
-        }
+        let enrichedEvents = Self.enrich(events: deduped.events, with: [], around: searchLocation)
         let fallbackProfile = appliedProfiles.last ?? ExternalRadiusExpansionProfile(step: 0, hyperlocalRadiusMiles: 2, nightlifeRadiusMiles: 6, headlineRadiusMiles: 12)
         let eventSnapshot = ExternalEventIngestionSnapshot(
             fetchedAt: Date(),
@@ -316,33 +243,16 @@ actor ExternalLiveLocationDiscoveryService {
                 discoveryIntent: intent
             ),
             sourceResults: mergedEventResults,
-            mergedEvents: imageEnrichedEvents,
-            dedupeGroups: deduped.groups + combinedEvents.groups
+            mergedEvents: enrichedEvents,
+            dedupeGroups: deduped.groups
         )
         return ExternalLocationDiscoverySnapshot(
             fetchedAt: Date(),
             searchLocation: searchLocation,
             appliedProfiles: appliedProfiles,
-            venueSnapshot: mode == .fast ? nil : ExternalVenueDiscoverySnapshot(
-                fetchedAt: Date(),
-                query: ExternalVenueQuery(
-                    countryCode: searchLocation.countryCode,
-                    city: searchLocation.city,
-                    state: searchLocation.state,
-                    displayName: searchLocation.displayName,
-                    latitude: latitude,
-                    longitude: longitude,
-                    hyperlocalRadiusMiles: fallbackProfile.hyperlocalRadiusMiles,
-                    nightlifeRadiusMiles: fallbackProfile.nightlifeRadiusMiles,
-                    headlineRadiusMiles: fallbackProfile.headlineRadiusMiles,
-                    adaptiveRadiusExpansion: true,
-                    pageSize: mode == .preview ? 6 : 24
-                ),
-                sourceResults: mergedVenueResults,
-                venues: canonicalVenues
-            ),
+            venueSnapshot: nil,
             eventSnapshot: eventSnapshot,
-            mergedEvents: imageEnrichedEvents,
+            mergedEvents: enrichedEvents,
             notes: notes
         )
     }
