@@ -749,6 +749,20 @@ class AppState {
         }
 
         let cacheService = supabaseEventFeedCacheService
+        let discoveryService = externalLiveLocationDiscoveryService
+        let capturedPageSize = initialExternalEventPageSize
+
+        let concurrentFastDiscoveryTask = Task(priority: .userInitiated) {
+            await discoveryService.discover(
+                searchLocation: searchLocation,
+                forceRefresh: forceRefresh,
+                pageSize: capturedPageSize,
+                sourcePageDepth: 1,
+                mode: .fast,
+                intent: discoveryIntent
+            )
+        }
+
         async let primaryCacheLoad = cacheService.load(
             searchLocation: searchLocation,
             intent: discoveryIntent
@@ -769,6 +783,7 @@ class AppState {
         if var resolvedSnapshot = serverSnapshot {
             guard refreshGeneration == externalEventRefreshGeneration else {
                 isRefreshingExternalEvents = false
+                concurrentFastDiscoveryTask.cancel()
                 return
             }
 
@@ -788,6 +803,7 @@ class AppState {
             if shouldApplyCachedDiscoverySnapshot(resolvedSnapshot) {
                 applyExternalDiscoverySnapshot(resolvedSnapshot, intent: discoveryIntent)
                 isRefreshingExternalEvents = false
+                concurrentFastDiscoveryTask.cancel()
 
                 let capturedFilterOption = externalEventFilterOption
                 Task { [weak self] in
@@ -826,21 +842,34 @@ class AppState {
             }
         }
 
-        if let fallbackPersisted = await Task.detached(priority: .userInitiated, operation: {
-            for fallbackIntent in ExternalDiscoveryIntent.allCases where fallbackIntent != discoveryIntent {
-                if let p = PersistenceService.loadExternalDiscoveryState(intent: fallbackIntent),
-                   Date().timeIntervalSince(p.savedAt) <= localDisplayableMaxAge,
-                   !p.snapshot.mergedEvents.isEmpty {
-                    return p
-                }
+        let concurrentFastSnapshot = await concurrentFastDiscoveryTask.value
+        if !concurrentFastSnapshot.mergedEvents.isEmpty {
+            guard refreshGeneration == externalEventRefreshGeneration else {
+                isRefreshingExternalEvents = false
+                return
             }
-            return nil as PersistedExternalDiscoveryState?
-        }).value {
-            let sanitizedFallback = Self.sanitizedExternalDiscoverySnapshot(fallbackPersisted.snapshot)
-            if refreshGeneration == externalEventRefreshGeneration,
-               externalEventSnapshot == nil || (externalEventSnapshot?.mergedEvents.isEmpty ?? true) {
-                externalEventSearchLocation = fallbackPersisted.searchLocation
-                applyExternalDiscoverySnapshot(sanitizedFallback, intent: fallbackPersisted.intent)
+            applyExternalDiscoverySnapshot(concurrentFastSnapshot, intent: discoveryIntent)
+            isRefreshingExternalEvents = false
+        }
+
+        if concurrentFastSnapshot.mergedEvents.isEmpty {
+            if let fallbackPersisted = await Task.detached(priority: .userInitiated, operation: {
+                for fallbackIntent in ExternalDiscoveryIntent.allCases where fallbackIntent != discoveryIntent {
+                    if let p = PersistenceService.loadExternalDiscoveryState(intent: fallbackIntent),
+                       Date().timeIntervalSince(p.savedAt) <= localDisplayableMaxAge,
+                       !p.snapshot.mergedEvents.isEmpty {
+                        return p
+                    }
+                }
+                return nil as PersistedExternalDiscoveryState?
+            }).value {
+                let sanitizedFallback = Self.sanitizedExternalDiscoverySnapshot(fallbackPersisted.snapshot)
+                if refreshGeneration == externalEventRefreshGeneration,
+                   externalEventSnapshot == nil || (externalEventSnapshot?.mergedEvents.isEmpty ?? true) {
+                    externalEventSearchLocation = fallbackPersisted.searchLocation
+                    applyExternalDiscoverySnapshot(sanitizedFallback, intent: fallbackPersisted.intent)
+                    isRefreshingExternalEvents = false
+                }
             }
         }
 
@@ -850,7 +879,8 @@ class AppState {
             refreshGeneration: refreshGeneration,
             intent: discoveryIntent,
             filterOption: externalEventFilterOption,
-            mode: initialMode
+            mode: initialMode,
+            skipFastPhase: !concurrentFastSnapshot.mergedEvents.isEmpty
         )
     }
 
@@ -882,14 +912,35 @@ class AppState {
         refreshGeneration: Int,
         intent: ExternalDiscoveryIntent,
         filterOption: ExternalEventFilterOption,
-        mode: ExternalLiveLocationDiscoveryService.DiscoveryMode
+        mode: ExternalLiveLocationDiscoveryService.DiscoveryMode,
+        skipFastPhase: Bool = false
     ) {
+        let capturedPageSize = initialExternalEventPageSize
         Task { [weak self] in
             guard let self else { return }
+
+            if !skipFastPhase && (mode == .preview || mode == .full) {
+                let fastSnapshot = await self.externalLiveLocationDiscoveryService.discover(
+                    searchLocation: searchLocation,
+                    forceRefresh: forceRefresh,
+                    pageSize: capturedPageSize,
+                    sourcePageDepth: 1,
+                    mode: .fast,
+                    intent: intent
+                )
+                await MainActor.run {
+                    guard refreshGeneration == self.externalEventRefreshGeneration else { return }
+                    if !fastSnapshot.mergedEvents.isEmpty {
+                        self.applyExternalDiscoverySnapshot(fastSnapshot, intent: intent)
+                    }
+                    self.isRefreshingExternalEvents = false
+                }
+            }
+
             let localSnapshot = await self.externalLiveLocationDiscoveryService.discover(
                 searchLocation: searchLocation,
                 forceRefresh: forceRefresh,
-                pageSize: self.initialExternalEventPageSize,
+                pageSize: capturedPageSize,
                 sourcePageDepth: 1,
                 mode: mode,
                 intent: intent
@@ -908,7 +959,9 @@ class AppState {
                         self.persistExternalDiscoverySnapshot(localSnapshot, intent: intent, quality: .fast)
                     }
                 }
-                self.isRefreshingExternalEvents = false
+                if mode == .fast {
+                    self.isRefreshingExternalEvents = false
+                }
             }
 
             let nightlifeCount = localSnapshot.mergedEvents.filter {
