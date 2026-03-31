@@ -99,6 +99,52 @@ actor SupabaseEventFeedCacheService {
         configuration.isConfigured
     }
 
+    func loadFast(
+        searchLocation: ExternalEventSearchLocation,
+        intent: ExternalDiscoveryIntent
+    ) async -> ExternalLocationDiscoverySnapshot? {
+        guard configuration.isConfigured else {
+            return nil
+        }
+
+        if let request = makeLoadRequest(searchLocation: searchLocation, intent: intent),
+           let rows = await fetchRows(for: request) {
+            let candidates = decodeCandidates(from: rows)
+            if let snapshot = loadedSnapshotFast(
+                from: candidates,
+                intent: intent
+            ), !snapshot.mergedEvents.isEmpty {
+                return snapshot
+            }
+        }
+
+        let nearbyTask = Task<ExternalLocationDiscoverySnapshot?, Never> {
+            guard let request = makeNearbyBucketLoadRequest(searchLocation: searchLocation, intent: intent),
+                  let rows = await fetchRows(for: request),
+                  let candidate = Self.bestFallbackCandidate(from: decodeCandidates(from: rows), for: searchLocation)
+            else { return nil }
+            let sanitized = Self.sanitizedSnapshot(candidate.snapshot, intent: intent)
+            return sanitized.mergedEvents.isEmpty ? nil : sanitized
+        }
+
+        let fallbackTask = Task<ExternalLocationDiscoverySnapshot?, Never> {
+            guard let request = makeFallbackLoadRequest(searchLocation: searchLocation, intent: intent),
+                  let rows = await fetchRows(for: request),
+                  let candidate = Self.bestFallbackCandidate(from: decodeCandidates(from: rows), for: searchLocation)
+            else { return nil }
+            let sanitized = Self.sanitizedSnapshot(candidate.snapshot, intent: intent)
+            return sanitized.mergedEvents.isEmpty ? nil : sanitized
+        }
+
+        let nearbyResult = await nearbyTask.value
+        let fallbackResult = await fallbackTask.value
+
+        if let nearby = nearbyResult, let fallback = fallbackResult {
+            return Self.preferredFallbackSnapshot(nearby, candidate: fallback)
+        }
+        return nearbyResult ?? fallbackResult
+    }
+
     func load(
         searchLocation: ExternalEventSearchLocation,
         intent: ExternalDiscoveryIntent
@@ -469,6 +515,34 @@ actor SupabaseEventFeedCacheService {
                 bucketLongitude: Self.doubleValue(from: row["bucket_longitude"])
             )
         }
+    }
+
+    private func loadedSnapshotFast(
+        from candidates: [SnapshotLoadCandidate],
+        intent: ExternalDiscoveryIntent
+    ) -> ExternalLocationDiscoverySnapshot? {
+        guard !candidates.isEmpty else { return nil }
+
+        let sanitizedCandidates = candidates.map { candidate in
+            SnapshotLoadCandidate(
+                snapshot: Self.sanitizedSnapshot(candidate.snapshot, intent: intent),
+                quality: candidate.quality,
+                fetchedAt: candidate.fetchedAt,
+                city: candidate.city,
+                state: candidate.state,
+                displayName: candidate.displayName,
+                latitude: candidate.latitude,
+                longitude: candidate.longitude,
+                bucketLatitude: candidate.bucketLatitude,
+                bucketLongitude: candidate.bucketLongitude
+            )
+        }
+
+        guard let preferred = Self.bestExactCandidate(from: sanitizedCandidates, intent: intent) else {
+            return nil
+        }
+
+        return Self.repairedGoogleReviewSnapshot(preferred.snapshot, using: sanitizedCandidates)
     }
 
     private func loadedSnapshot(

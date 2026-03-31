@@ -763,13 +763,13 @@ class AppState {
             )
         }
 
-        async let primaryCacheLoad = cacheService.load(
+        async let primaryFastCacheLoad = cacheService.loadFast(
             searchLocation: searchLocation,
             intent: discoveryIntent
         )
-        async let nightlifeCacheLoad: ExternalLocationDiscoverySnapshot? = {
+        async let nightlifeFastCacheLoad: ExternalLocationDiscoverySnapshot? = {
             if discoveryIntent != .exclusiveHot {
-                return await cacheService.load(
+                return await cacheService.loadFast(
                     searchLocation: searchLocation,
                     intent: .exclusiveHot
                 )
@@ -777,8 +777,8 @@ class AppState {
             return nil
         }()
 
-        let serverSnapshot = await primaryCacheLoad
-        let nightlifeSupplementSnapshot = await nightlifeCacheLoad
+        let serverSnapshot = await primaryFastCacheLoad
+        let nightlifeSupplementSnapshot = await nightlifeFastCacheLoad
 
         if var resolvedSnapshot = serverSnapshot {
             guard refreshGeneration == externalEventRefreshGeneration else {
@@ -808,8 +808,13 @@ class AppState {
                 let capturedFilterOption = externalEventFilterOption
                 Task { [weak self] in
                     guard let self else { return }
+                    let repairedSnapshot = await cacheService.load(
+                        searchLocation: searchLocation,
+                        intent: discoveryIntent
+                    )
+                    guard let repairedSnapshot else { return }
                     let serverDisplaySnapshot = await self.displaySnapshot(
-                        from: resolvedSnapshot,
+                        from: repairedSnapshot,
                         searchLocation: searchLocation,
                         primaryIntent: discoveryIntent,
                         filterOption: capturedFilterOption
@@ -1000,8 +1005,15 @@ class AppState {
         externalEventFilterOption = option
         rebuildExternalEventFeed()
         if shouldRefreshForEventFilter(option) {
-            Task { [weak self] in
-                await self?.refreshExternalEvents(forceRefresh: true)
+            let hasVisibleEvents = currentSnapshotHasUsefulEvents(for: option)
+            if hasVisibleEvents {
+                Task { [weak self] in
+                    await self?.refreshExternalEvents(forceRefresh: false)
+                }
+            } else {
+                Task { [weak self] in
+                    await self?.refreshExternalEvents(forceRefresh: true)
+                }
             }
         }
     }
@@ -3659,10 +3671,10 @@ class AppState {
         }
         let cacheService = supabaseEventFeedCacheService
         Task(priority: .userInitiated) { [weak self] in
-            async let primaryLoad = cacheService.load(searchLocation: searchLocation, intent: intent)
+            async let primaryLoad = cacheService.loadFast(searchLocation: searchLocation, intent: intent)
             async let nightlifeLoad: ExternalLocationDiscoverySnapshot? = {
                 if intent != .exclusiveHot {
-                    return await cacheService.load(searchLocation: searchLocation, intent: .exclusiveHot)
+                    return await cacheService.loadFast(searchLocation: searchLocation, intent: .exclusiveHot)
                 }
                 return nil
             }()
