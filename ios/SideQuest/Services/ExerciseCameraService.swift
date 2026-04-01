@@ -55,9 +55,9 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
 
     nonisolated(unsafe) private var _frameSkip: Int = 0
     nonisolated(unsafe) private var _pushUpPhase: Int = 0
-    nonisolated(unsafe) private var _prevAvgArm: Double = 0
     nonisolated(unsafe) private var _repCooldown: Int = 0
-    nonisolated(unsafe) private var _armAngleHistory: [Double] = []
+    nonisolated(unsafe) private var _heightHistory: [Double] = []
+    nonisolated(unsafe) private var _maxHeightDiff: Double = 0
     nonisolated(unsafe) private var _bodyLostFrames: Int = 0
     nonisolated(unsafe) private var _smoothedJoints: [String: CGPoint] = [:]
     nonisolated(unsafe) private var _downFrameCount: Int = 0
@@ -126,9 +126,10 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     private(set) var isStanding: Bool = false
     private(set) var displayStanding: Bool = false
     private(set) var inPushUpPosture: Bool = false
+    private(set) var shoulderDepthNormalized: CGFloat = 1.0
 
     private let jointSmoothingFactor: Double = 0.55
-    private let armHistorySize: Int = 8
+    private let heightHistorySize: Int = 6
     private let hysteresisDownFrames: Int = 2
     private let hysteresisUpFrames: Int = 2
     private let repCooldownFrames: Int = 4
@@ -184,9 +185,9 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         isRunning = true
         _frameSkip = 0
         _pushUpPhase = 0
-        _prevAvgArm = 0
         _repCooldown = 0
-        _armAngleHistory = []
+        _heightHistory = []
+        _maxHeightDiff = 0
         _bodyLostFrames = 0
         _smoothedJoints = [:]
         _downFrameCount = 0
@@ -227,9 +228,9 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     func resetPushUpCount() {
         pushUpCount = 0
         _pushUpPhase = 0
-        _prevAvgArm = 0
         _repCooldown = 0
-        _armAngleHistory = []
+        _heightHistory = []
+        _maxHeightDiff = 0
         _downFrameCount = 0
         _upFrameCount = 0
         _kneeDownCooldown = 0
@@ -409,7 +410,7 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         if detected && !standingDetected {
             if let sMid = shoulderMid, let hMid = hipMid {
                 let verticalDiff = abs(sMid.y - hMid.y)
-                pushUpPosture = verticalDiff < 0.18
+                pushUpPosture = verticalDiff < 0.25
             }
         }
 
@@ -423,33 +424,48 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         if _postureGoodFrames >= postureDebounceFrames { _pushUpPostureActive = true }
         if _postureBadFrames >= postureDebounceFrames { _pushUpPostureActive = false }
 
-        let rawAvgArm = (lAngle + rAngle) / 2.0
-        _armAngleHistory.append(rawAvgArm)
-        if _armAngleHistory.count > armHistorySize {
-            _armAngleHistory.removeFirst()
-        }
-        let smoothedArm = _armAngleHistory.reduce(0, +) / Double(_armAngleHistory.count)
-
-        var newRepCount: Int? = nil
-        var phaseLabel = "Ready"
-
         let hasArms = (smoothed["leftElbow"] != nil || smoothed["rightElbow"] != nil) &&
                       (smoothed["leftWrist"] != nil || smoothed["rightWrist"] != nil)
 
-        let requiredJointsForRep = hasArms && hasHead && !standingDetected && _pushUpPostureActive
+        var newRepCount: Int? = nil
+        var phaseLabel = "Ready"
+        var depthNormalized: CGFloat = 1.0
 
-        if detected && (lAngle > 5 || rAngle > 5) && requiredJointsForRep {
-            let downThreshold: Double = 100
-            let upThreshold: Double = 140
+        let hasShoulders = smoothed["leftShoulder"] != nil || smoothed["rightShoulder"] != nil
+        let hasWrists = smoothed["leftWrist"] != nil || smoothed["rightWrist"] != nil
+        let canTrackReps = hasShoulders && hasWrists && !standingDetected && _pushUpPostureActive
+
+        let wristMid = Self.midpoint(smoothed["leftWrist"], smoothed["rightWrist"])
+
+        if detected && canTrackReps, let sMid = shoulderMid, let wMid = wristMid {
+            let heightDiff = sMid.y - wMid.y
+
+            _heightHistory.append(heightDiff)
+            if _heightHistory.count > heightHistorySize {
+                _heightHistory.removeFirst()
+            }
+            let smoothedHeight = _heightHistory.reduce(0, +) / Double(_heightHistory.count)
+
+            if smoothedHeight > _maxHeightDiff {
+                _maxHeightDiff = smoothedHeight
+            } else {
+                _maxHeightDiff *= 0.997
+            }
+
+            let normalized = _maxHeightDiff > 0.015 ? max(0, min(1, smoothedHeight / _maxHeightDiff)) : 1.0
+            depthNormalized = CGFloat(normalized)
+
+            let downThresh = 0.35
+            let upThresh = 0.70
 
             if _repCooldown > 0 {
                 _repCooldown -= 1
             }
 
-            if smoothedArm < downThreshold {
+            if normalized < downThresh {
                 _downFrameCount += 1
                 _upFrameCount = 0
-            } else if smoothedArm > upThreshold {
+            } else if normalized > upThresh {
                 _upFrameCount += 1
                 _downFrameCount = 0
             } else {
@@ -478,13 +494,13 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             phaseLabel = "Standing"
             _downFrameCount = 0
             _upFrameCount = 0
+            _heightHistory = []
         } else if detected && !_pushUpPostureActive {
             phaseLabel = "Get Down"
             _downFrameCount = 0
             _upFrameCount = 0
+            _heightHistory = []
         }
-
-        _prevAvgArm = smoothedArm
 
         let allXs = smoothed.values.map(\.x)
         let allYs = smoothed.values.map(\.y)
@@ -610,6 +626,7 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             self.isStanding = standingDetected
             self.displayStanding = stableStand
             self.inPushUpPosture = stablePosture
+            self.shoulderDepthNormalized = depthNormalized
             if let inc = newRepCount {
                 self.pushUpCount += inc
             }

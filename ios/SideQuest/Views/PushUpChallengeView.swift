@@ -399,7 +399,53 @@ struct PushUpChallengeView: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 16)
         }
+        .overlay(alignment: .trailing) {
+            if cameraService.cameraAvailable {
+                depthIndicator
+                    .padding(.trailing, 12)
+            }
+        }
         .animation(.easeInOut(duration: 0.35), value: hasActiveWarning)
+    }
+
+    // MARK: - Depth Indicator
+
+    private var depthIndicator: some View {
+        let trackHeight: CGFloat = 180
+        let ballSize: CGFloat = 22
+        let greenZone: CGFloat = 0.35
+        let depth = cameraService.shoulderDepthNormalized
+
+        return VStack(spacing: 6) {
+            Text("UP")
+                .font(.system(size: 9, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.4))
+
+            ZStack(alignment: .bottom) {
+                Capsule()
+                    .fill(.white.opacity(0.12))
+                    .frame(width: 8, height: trackHeight)
+
+                Capsule()
+                    .fill(.green.opacity(0.25))
+                    .frame(width: 8, height: trackHeight * greenZone)
+
+                Circle()
+                    .fill(depth <= greenZone ? .green : .white)
+                    .frame(width: ballSize, height: ballSize)
+                    .shadow(color: depth <= greenZone ? .green.opacity(0.7) : .clear, radius: 6)
+                    .offset(y: -(trackHeight - ballSize) * depth)
+                    .animation(.interpolatingSpring(stiffness: 150, damping: 14), value: depth)
+            }
+            .frame(height: trackHeight)
+
+            Text("DOWN")
+                .font(.system(size: 9, weight: .heavy))
+                .foregroundStyle(.green.opacity(0.6))
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 6)
+        .background(.black.opacity(0.3), in: .rect(cornerRadius: 12))
     }
 
     // MARK: - Warning Banners (Large)
