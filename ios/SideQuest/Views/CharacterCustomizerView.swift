@@ -3,46 +3,27 @@ import SwiftUI
 struct CharacterCustomizerView: View {
     let appState: AppState
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedCharacter: PlayerCharacterType
-
-    init(appState: AppState) {
-        self.appState = appState
-        _selectedCharacter = State(initialValue: appState.profile.selectedCharacter)
-    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
                     previewCard
-                    characterInfoCard
-                    characterSelector
+                    equipmentSection
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 16)
                 .padding(.bottom, 24)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("Choose Character")
+            .navigationTitle("Customize Character")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
-
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(selectedCharacterOwned ? "Equip" : "Shop First") {
-                        appState.selectCharacter(selectedCharacter)
-                        dismiss()
-                    }
-                    .fontWeight(.semibold)
-                    .disabled(!selectedCharacterOwned)
+                    Button("Done") { dismiss() }
                 }
             }
         }
-        .sensoryFeedback(.selection, trigger: selectedCharacter)
     }
 
     private var previewCard: some View {
@@ -60,18 +41,14 @@ struct CharacterCustomizerView: View {
                     )
                 )
 
-            Image(systemName: selectedCharacter.iconName)
-                .font(.system(size: 72, weight: .bold))
-                .foregroundStyle(.orange.opacity(0.18))
-
             Character3DView(
-                characterType: selectedCharacter,
+                characterType: .base,
                 allowsControl: true,
                 autoRotate: false,
                 framing: .fullBody,
-                modelYawDegrees: 180
+                modelYawDegrees: 180,
+                equipment: appState.characterEquipment
             )
-            .id(selectedCharacter)
             .padding(12)
 
             if let equippedEffect = appState.profile.equippedEffect {
@@ -82,10 +59,10 @@ struct CharacterCustomizerView: View {
         .clipShape(.rect(cornerRadius: 28))
         .overlay(alignment: .bottomLeading) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(selectedCharacter.displayName)
+                Text("Your Character")
                     .font(.title2.weight(.bold))
 
-                Text("Drag to inspect")
+                Text("Drag to inspect · Tap slots to equip gear")
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
             }
@@ -93,87 +70,63 @@ struct CharacterCustomizerView: View {
         }
     }
 
-    private var characterInfoCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Image(systemName: selectedCharacter.iconName)
-                    .font(.headline.weight(.bold))
-                    .foregroundStyle(.orange)
-                    .frame(width: 34, height: 34)
-                    .background(Color.orange.opacity(0.12), in: Circle())
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(selectedCharacter.displayName)
-                        .font(.headline)
-
-                    if selectedCharacter == appState.profile.selectedCharacter {
-                        Text("Currently Equipped")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.green)
-                    } else if selectedCharacterOwned {
-                        Text("Owned")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.blue)
-                    } else {
-                        Text("Unlock in Shop · \(selectedCharacter.shopPrice) gold")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.orange)
-                    }
-                }
-
-                Spacer()
-            }
-
-            Text(selectedCharacter.lore)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(18)
-        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 22))
-    }
-
-    private var characterSelector: some View {
-        let columns: [GridItem] = [
-            GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 12)
-        ]
-
-        return VStack(alignment: .leading, spacing: 12) {
-            Text("Classes")
+    private var equipmentSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Equipment Slots")
                 .font(.headline)
                 .padding(.horizontal, 2)
 
-            LazyVGrid(columns: columns, spacing: 12) {
-                ForEach(PlayerCharacterType.allCases) { character in
-                    characterCard(character)
-                }
+            ForEach(EquipmentSlot.allCases) { slot in
+                equipmentSlotRow(slot)
             }
         }
     }
 
-    private var selectedCharacterOwned: Bool {
-        appState.isCharacterOwned(selectedCharacter)
-    }
-
-    private func characterCard(_ character: PlayerCharacterType) -> some View {
-        let isSelected: Bool = character == selectedCharacter
-        let isEquipped: Bool = character == appState.profile.selectedCharacter
-        let isOwned: Bool = appState.isCharacterOwned(character)
+    private func equipmentSlotRow(_ slot: EquipmentSlot) -> some View {
+        let isEquipped: Bool = appState.characterEquipment.equipped(for: slot) != nil
+        let item = appState.characterEquipment.resolvedItem(for: slot)
 
         return Button {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                selectedCharacter = character
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                appState.toggleEquipmentSlot(slot)
             }
         } label: {
-            CharacterSelectionCardView(
-                character: character,
-                isSelected: isSelected,
-                isEquipped: isEquipped,
-                isOwned: isOwned
-            )
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(isEquipped ? Color.orange.opacity(0.12) : Color(.tertiarySystemGroupedBackground))
+                        .frame(width: 52, height: 52)
+                    Image(systemName: slot.iconName)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(isEquipped ? .orange : .secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(slot.displayName)
+                        .font(.subheadline.weight(.semibold))
+                    Text(item?.label ?? "None equipped")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Text(isEquipped ? "Unequip" : "Equip")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(isEquipped ? .orange : .blue)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        isEquipped
+                            ? Color.orange.opacity(0.1)
+                            : Color.blue.opacity(0.1),
+                        in: Capsule()
+                    )
+            }
+            .padding(14)
+            .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 16))
         }
         .buttonStyle(.plain)
+        .sensoryFeedback(.selection, trigger: isEquipped)
     }
 }
-

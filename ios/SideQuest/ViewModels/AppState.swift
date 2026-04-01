@@ -2608,13 +2608,12 @@ class AppState {
     }
 
     func isCharacterOwned(_ character: PlayerCharacterType) -> Bool {
-        character.isStarterSkin || profile.ownedItems.contains(character.displayName)
+        true
     }
 
     func selectCharacter(_ character: PlayerCharacterType) {
-        guard isCharacterOwned(character) else { return }
-        profile.selectedCharacter = character
-        profile.equippedSkin = character.isStarterSkin ? nil : character.displayName
+        profile.selectedCharacter = .base
+        profile.equippedSkin = nil
         saveState()
     }
 
@@ -3825,9 +3824,8 @@ class AppState {
     private func normalizeCosmeticState() {
         var didChange: Bool = false
 
-        if !profile.selectedCharacter.isStarterSkin,
-           !profile.ownedItems.contains(profile.selectedCharacter.displayName) {
-            profile.ownedItems.append(profile.selectedCharacter.displayName)
+        if profile.selectedCharacter != .base {
+            profile.selectedCharacter = .base
             didChange = true
         }
 
@@ -3855,9 +3853,8 @@ class AppState {
             didChange = true
         }
 
-        let normalizedSkin: String? = profile.selectedCharacter.isStarterSkin ? nil : profile.selectedCharacter.displayName
-        if profile.equippedSkin != normalizedSkin {
-            profile.equippedSkin = normalizedSkin
+        if profile.equippedSkin != nil {
+            profile.equippedSkin = nil
             didChange = true
         }
 
