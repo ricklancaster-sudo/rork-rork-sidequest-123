@@ -13,6 +13,8 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     nonisolated(unsafe) private var _plankGoodFrames: Int = 0
     nonisolated(unsafe) private var _plankBadFrames: Int = 0
     nonisolated(unsafe) private var _stablePlankDetected: Bool = false
+    nonisolated(unsafe) private var _plankEverConfirmed: Bool = false
+    nonisolated(unsafe) private var _plankLostFrames: Int = 0
     nonisolated(unsafe) private var _kneeDisplayTrueFrames: Int = 0
     nonisolated(unsafe) private var _kneeDisplayFalseFrames: Int = 0
     nonisolated(unsafe) private var _stableKneesOnGround: Bool = false
@@ -25,6 +27,8 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
 
     private let jointSmoothingFactor: Double = 0.35
     private let displayDebounceFrames: Int = 6
+    private let plankConfirmFrames: Int = 4
+    private let plankLoseFrames: Int = 20
 
     private(set) var bodyDetected: Bool = false
     private(set) var jointPositions: [String: CGPoint] = [:]
@@ -59,7 +63,13 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         isConfigured = true
 
         captureSession.beginConfiguration()
-        captureSession.sessionPreset = .medium
+        if captureSession.canSetSessionPreset(.hd1280x720) {
+            captureSession.sessionPreset = .hd1280x720
+        } else if captureSession.canSetSessionPreset(.high) {
+            captureSession.sessionPreset = .high
+        } else {
+            captureSession.sessionPreset = .medium
+        }
 
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
               let input = try? AVCaptureDeviceInput(device: device) else {
@@ -98,6 +108,8 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         _plankGoodFrames = 0
         _plankBadFrames = 0
         _stablePlankDetected = false
+        _plankEverConfirmed = false
+        _plankLostFrames = 0
         _kneeDisplayTrueFrames = 0
         _kneeDisplayFalseFrames = 0
         _stableKneesOnGround = false
@@ -136,10 +148,13 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if let pose {
             let mapping: [(VNHumanBodyPoseObservation.JointName, String)] = [
                 (.nose, "nose"),
+                (.leftEye, "leftEye"), (.rightEye, "rightEye"),
                 (.leftEar, "leftEar"), (.rightEar, "rightEar"),
+                (.neck, "neck"),
                 (.leftShoulder, "leftShoulder"), (.rightShoulder, "rightShoulder"),
                 (.leftElbow, "leftElbow"), (.rightElbow, "rightElbow"),
                 (.leftWrist, "leftWrist"), (.rightWrist, "rightWrist"),
+                (.root, "root"),
                 (.leftHip, "leftHip"), (.rightHip, "rightHip"),
                 (.leftKnee, "leftKnee"), (.rightKnee, "rightKnee"),
                 (.leftAnkle, "leftAnkle"), (.rightAnkle, "rightAnkle"),
@@ -181,22 +196,53 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         if let sMid = shoulderMid, let hMid = hipMid {
             let verticalDiff = abs(sMid.y - hMid.y)
             let horizontalDiff = abs(sMid.x - hMid.x)
-            standingDetected = verticalDiff > 0.15 && horizontalDiff < 0.12
+            let hipToAnkleVert = ankleMid.map { abs(hMid.y - $0.y) } ?? 0
+            standingDetected = verticalDiff > 0.22 && horizontalDiff < 0.12 && hipToAnkleVert > 0.15
         }
 
-        var plankDetected = false
+        var plankDetectedThisFrame = false
         if detected && !standingDetected {
-            if let sMid = shoulderMid, let hMid = hipMid {
-                let verticalDiff = abs(sMid.y - hMid.y)
-                plankDetected = verticalDiff < 0.15
-            }
-            if plankDetected, let hMid = hipMid, let aMid = ankleMid {
-                let bodyAlignment = ExerciseCameraService.jointAngle(a: shoulderMid, b: hipMid, c: ankleMid)
-                let hipSag = hMid.y - max(shoulderMid?.y ?? 0, aMid.y)
-                if bodyAlignment < 120 || hipSag > 0.08 {
-                    plankDetected = false
+            let hasShoulders = smoothed["leftShoulder"] != nil || smoothed["rightShoulder"] != nil
+            let hasWrists = smoothed["leftWrist"] != nil || smoothed["rightWrist"] != nil
+
+            if hasShoulders && hasWrists {
+                if let sMid = shoulderMid, let hMid = hipMid {
+                    let verticalDiff = abs(sMid.y - hMid.y)
+                    plankDetectedThisFrame = verticalDiff < 0.25
+                } else if let sMid = shoulderMid {
+                    let wristMid = ExerciseCameraService.midpoint(smoothed["leftWrist"], smoothed["rightWrist"])
+                    if let wMid = wristMid {
+                        let verticalDiff = abs(sMid.y - wMid.y)
+                        plankDetectedThisFrame = verticalDiff < 0.20
+                    }
                 }
             }
+        }
+
+        if plankDetectedThisFrame {
+            _plankGoodFrames += 1
+            _plankBadFrames = 0
+            _plankLostFrames = 0
+        } else {
+            _plankBadFrames += 1
+            _plankGoodFrames = 0
+            if _plankEverConfirmed {
+                _plankLostFrames += 1
+            }
+        }
+
+        if _plankGoodFrames >= plankConfirmFrames {
+            _stablePlankDetected = true
+            _plankEverConfirmed = true
+        }
+        if _plankEverConfirmed {
+            if standingDetected && _standingTrueFrames >= displayDebounceFrames {
+                _stablePlankDetected = false
+            } else if _plankLostFrames >= plankLoseFrames {
+                _stablePlankDetected = false
+            }
+        } else {
+            if _plankBadFrames >= displayDebounceFrames { _stablePlankDetected = false }
         }
 
         let lKnee = ExerciseCameraService.jointAngle(
@@ -213,17 +259,20 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             let leftNear = ExerciseCameraService.kneeNearAnkleVertically(knee: smoothed["leftKnee"], ankle: smoothed["leftAnkle"])
             let rightNear = ExerciseCameraService.kneeNearAnkleVertically(knee: smoothed["rightKnee"], ankle: smoothed["rightAnkle"])
             kneesDown = (leftBent && leftNear) || (rightBent && rightNear)
-        }
 
-        if plankDetected {
-            _plankGoodFrames += 1
-            _plankBadFrames = 0
-        } else {
-            _plankBadFrames += 1
-            _plankGoodFrames = 0
+            if !kneesDown {
+                let hipY = hipMid?.y ?? 0
+                let kneeY = ExerciseCameraService.midpoint(smoothed["leftKnee"], smoothed["rightKnee"])?.y ?? 0
+                let ankleY = ankleMid?.y ?? 0
+                if kneeY > 0 && ankleY > 0 && hipY > 0 {
+                    let kneeToAnkleDist = abs(kneeY - ankleY)
+                    let hipToAnkleDist = abs(hipY - ankleY)
+                    if hipToAnkleDist > 0.01 && kneeToAnkleDist / hipToAnkleDist < 0.25 {
+                        kneesDown = true
+                    }
+                }
+            }
         }
-        if _plankGoodFrames >= displayDebounceFrames { _stablePlankDetected = true }
-        if _plankBadFrames >= displayDebounceFrames { _stablePlankDetected = false }
 
         if kneesDown {
             _kneeDisplayTrueFrames += 1
@@ -253,7 +302,7 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             _standingTrueFrames = 0
         }
         if _standingTrueFrames >= displayDebounceFrames { _stableStanding = true }
-        if _standingFalseFrames >= displayDebounceFrames { _stableStanding = false }
+        if _standingFalseFrames >= (displayDebounceFrames * 2) { _stableStanding = false }
 
         let hasArms = (smoothed["leftElbow"] != nil || smoothed["rightElbow"] != nil) &&
                       (smoothed["leftWrist"] != nil || smoothed["rightWrist"] != nil)
@@ -296,7 +345,7 @@ class PlankCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             self.visibleJointCount = count
             self.totalFramesProcessed += 1
             if detected { self.framesWithBody += 1 }
-            self.inPlankPosition = plankDetected
+            self.inPlankPosition = plankDetectedThisFrame
             self.displayPlankDetected = stablePlank
             self.kneesOnGround = kneesDown
             self.displayKneesOnGround = stableKnee

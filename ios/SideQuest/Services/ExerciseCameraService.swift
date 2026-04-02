@@ -132,12 +132,13 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     private(set) var inPushUpPosture: Bool = false
     private(set) var shoulderDepthNormalized: CGFloat = 1.0
 
-    private let jointSmoothingFactor: Double = 0.55
-    private let heightHistorySize: Int = 6
+    private let jointSmoothingFactor: Double = 0.4
+    private let heightHistorySize: Int = 10
     private let hysteresisDownFrames: Int = 2
     private let hysteresisUpFrames: Int = 2
     private let repCooldownFrames: Int = 4
     private let kneeRecoveryCooldownFrames: Int = 8
+    private let maxDepthJumpPerFrame: Double = 0.12
 
     var positioningReady: Bool {
         bodyDetected && armsVisible && goodDistance && headDetected && lowerBodyVisible
@@ -454,18 +455,9 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             _trackingLostFrames = 0
             _calibrationFrames += 1
 
-            let headY = smoothed["nose"]?.y
-                ?? Self.midpoint(smoothed["leftEye"], smoothed["rightEye"])?.y
-                ?? Self.midpoint(smoothed["leftEar"], smoothed["rightEar"])?.y
-
             let shoulderY = sMid.y
             let wristY = wMid.y
-            let heightDiff: Double
-            if let hY = headY {
-                heightDiff = ((hY - wristY) + (shoulderY - wristY)) / 2.0
-            } else {
-                heightDiff = shoulderY - wristY
-            }
+            let heightDiff = shoulderY - wristY
 
             _heightHistory.append(heightDiff)
             if _heightHistory.count > heightHistorySize {
@@ -488,12 +480,23 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             let minRange = 0.03
             let effectiveMax = max(_maxHeightDiff, minRange)
             let rawNormalized = smoothedHeight / effectiveMax
-            let normalized = max(0.0, min(1.0, rawNormalized))
+            var normalized = max(0.0, min(1.0, rawNormalized))
+
+            let previousDepth = Double(_lastValidDepth)
+            let jump = abs(normalized - previousDepth)
+            if jump > maxDepthJumpPerFrame && _calibrationFrames > 10 {
+                if normalized > previousDepth {
+                    normalized = previousDepth + maxDepthJumpPerFrame
+                } else {
+                    normalized = previousDepth - maxDepthJumpPerFrame
+                }
+            }
+
             depthNormalized = CGFloat(normalized)
             _lastValidDepth = depthNormalized
 
-            let downThresh = 0.45
-            let upThresh = 0.70
+            let downThresh = 0.55
+            let upThresh = 0.75
 
             if _repCooldown > 0 {
                 _repCooldown -= 1
