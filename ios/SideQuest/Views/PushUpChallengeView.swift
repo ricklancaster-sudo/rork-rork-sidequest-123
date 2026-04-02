@@ -414,7 +414,7 @@ struct PushUpChallengeView: View {
     private var depthIndicator: some View {
         let trackHeight: CGFloat = 180
         let ballSize: CGFloat = 22
-        let greenZone: CGFloat = 0.55
+        let greenZone: CGFloat = 0.65
         let depth = min(1.0, max(0.0, cameraService.shoulderDepthNormalized))
 
         return VStack(spacing: 6) {

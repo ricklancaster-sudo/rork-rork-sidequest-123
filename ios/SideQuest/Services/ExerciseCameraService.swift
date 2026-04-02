@@ -82,6 +82,10 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     nonisolated(unsafe) private var _pushUpPostureActive: Bool = false
     nonisolated(unsafe) private var _postureGoodFrames: Int = 0
     nonisolated(unsafe) private var _postureBadFrames: Int = 0
+    nonisolated(unsafe) private var _postureEverConfirmed: Bool = false
+    nonisolated(unsafe) private var _lastValidDepth: CGFloat = 1.0
+    nonisolated(unsafe) private var _trackingLostFrames: Int = 0
+    nonisolated(unsafe) private var _calibrationFrames: Int = 0
 
     private let displayDebounceFrames: Int = 6
     private let postureDebounceFrames: Int = 4
@@ -212,6 +216,11 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         _pushUpPostureActive = false
         _postureGoodFrames = 0
         _postureBadFrames = 0
+        _postureEverConfirmed = false
+        _lastValidDepth = 1.0
+        _trackingLostFrames = 0
+        _calibrationFrames = 0
+        shoulderDepthNormalized = 1.0
         totalFramesProcessed = 0
         framesWithBody = 0
         updateCounter = 0
@@ -253,6 +262,7 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         inPushUpPosture = false
         lowerBodyVisible = false
         fullBodyVisible = false
+        shoulderDepthNormalized = 1.0
     }
 
     func stop() {
@@ -421,8 +431,11 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             _postureBadFrames += 1
             _postureGoodFrames = 0
         }
-        if _postureGoodFrames >= postureDebounceFrames { _pushUpPostureActive = true }
-        if _postureBadFrames >= postureDebounceFrames { _pushUpPostureActive = false }
+        if _postureGoodFrames >= postureDebounceFrames {
+            _pushUpPostureActive = true
+            _postureEverConfirmed = true
+        }
+        if _postureBadFrames >= (postureDebounceFrames * 5) { _pushUpPostureActive = false }
 
         let hasArms = (smoothed["leftElbow"] != nil || smoothed["rightElbow"] != nil) &&
                       (smoothed["leftWrist"] != nil || smoothed["rightWrist"] != nil)
@@ -433,12 +446,26 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
 
         let hasShoulders = smoothed["leftShoulder"] != nil || smoothed["rightShoulder"] != nil
         let hasWrists = smoothed["leftWrist"] != nil || smoothed["rightWrist"] != nil
-        let canTrackReps = hasShoulders && hasWrists && !standingDetected && _pushUpPostureActive
+        let canTrackReps = hasShoulders && hasWrists && !standingDetected && (_pushUpPostureActive || _postureEverConfirmed)
 
         let wristMid = Self.midpoint(smoothed["leftWrist"], smoothed["rightWrist"])
 
         if detected && canTrackReps, let sMid = shoulderMid, let wMid = wristMid {
-            let heightDiff = sMid.y - wMid.y
+            _trackingLostFrames = 0
+            _calibrationFrames += 1
+
+            let headY = smoothed["nose"]?.y
+                ?? Self.midpoint(smoothed["leftEye"], smoothed["rightEye"])?.y
+                ?? Self.midpoint(smoothed["leftEar"], smoothed["rightEar"])?.y
+
+            let shoulderY = sMid.y
+            let wristY = wMid.y
+            let heightDiff: Double
+            if let hY = headY {
+                heightDiff = ((hY - wristY) + (shoulderY - wristY)) / 2.0
+            } else {
+                heightDiff = shoulderY - wristY
+            }
 
             _heightHistory.append(heightDiff)
             if _heightHistory.count > heightHistorySize {
@@ -446,18 +473,27 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             }
             let smoothedHeight = _heightHistory.reduce(0, +) / Double(_heightHistory.count)
 
-            if smoothedHeight > _maxHeightDiff {
-                _maxHeightDiff = smoothedHeight
+            if _calibrationFrames < 20 {
+                if smoothedHeight > _maxHeightDiff {
+                    _maxHeightDiff = smoothedHeight
+                }
             } else {
-                _maxHeightDiff *= 0.997
+                if smoothedHeight > _maxHeightDiff {
+                    _maxHeightDiff = smoothedHeight
+                } else {
+                    _maxHeightDiff *= 0.999
+                }
             }
 
-            let rawNormalized = _maxHeightDiff > 0.015 ? smoothedHeight / _maxHeightDiff : 1.0
+            let minRange = 0.03
+            let effectiveMax = max(_maxHeightDiff, minRange)
+            let rawNormalized = smoothedHeight / effectiveMax
             let normalized = max(0.0, min(1.0, rawNormalized))
             depthNormalized = CGFloat(normalized)
+            _lastValidDepth = depthNormalized
 
-            let downThresh = 0.50
-            let upThresh = 0.75
+            let downThresh = 0.45
+            let upThresh = 0.70
 
             if _repCooldown > 0 {
                 _repCooldown -= 1
@@ -496,11 +532,21 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             _downFrameCount = 0
             _upFrameCount = 0
             _heightHistory = []
-        } else if detected && !_pushUpPostureActive {
+            _trackingLostFrames = 0
+        } else if detected && !_pushUpPostureActive && !_postureEverConfirmed {
             phaseLabel = "Get Down"
             _downFrameCount = 0
             _upFrameCount = 0
             _heightHistory = []
+            _trackingLostFrames = 0
+        } else if _postureEverConfirmed {
+            _trackingLostFrames += 1
+            if _trackingLostFrames < 15 {
+                depthNormalized = _lastValidDepth
+                phaseLabel = _pushUpPhase == 1 ? "Down" : "Up"
+            } else {
+                phaseLabel = "Repositioning"
+            }
         }
 
         let allXs = smoothed.values.map(\.x)
