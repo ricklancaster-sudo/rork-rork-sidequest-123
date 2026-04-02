@@ -452,11 +452,12 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
                 _maxHeightDiff *= 0.997
             }
 
-            let normalized = _maxHeightDiff > 0.015 ? max(0, min(1, smoothedHeight / _maxHeightDiff)) : 1.0
+            let rawNormalized = _maxHeightDiff > 0.015 ? smoothedHeight / _maxHeightDiff : 1.0
+            let normalized = max(0.0, min(1.0, rawNormalized))
             depthNormalized = CGFloat(normalized)
 
-            let downThresh = 0.35
-            let upThresh = 0.70
+            let downThresh = 0.50
+            let upThresh = 0.75
 
             if _repCooldown > 0 {
                 _repCooldown -= 1

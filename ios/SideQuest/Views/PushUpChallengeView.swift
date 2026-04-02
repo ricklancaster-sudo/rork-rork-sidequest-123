@@ -23,6 +23,8 @@ struct PushUpChallengeView: View {
     @State private var countdownTick: Int = 0
     @State private var borderGlowOpacity: Double = 0
     @State private var autoStartTriggered: Bool = false
+    @State private var activeWarningText: String? = nil
+    @State private var warningDebounceTask: Task<Void, Never>? = nil
 
     private var targetReps: Int { quest.targetReps ?? 100 }
     private var pathColor: Color { PathColorHelper.color(for: quest.path) }
@@ -37,13 +39,12 @@ struct PushUpChallengeView: View {
         return .clear
     }
 
-    private var hasActiveWarning: Bool {
-        phase == .active && (
-            cameraService.displayKneesOnGround ||
-            !cameraService.displayBodyDetected ||
-            !cameraService.displayHeadDetected ||
-            cameraService.displayStanding
-        )
+    private var currentWarningText: String? {
+        guard phase == .active else { return nil }
+        if cameraService.displayStanding { return "GET DOWN" }
+        if !cameraService.displayBodyDetected { return "BODY NOT DETECTED" }
+        if cameraService.displayKneesOnGround && !cameraService.displayStanding { return "KNEES OFF GROUND" }
+        return nil
     }
 
     var body: some View {
@@ -134,11 +135,31 @@ struct PushUpChallengeView: View {
                 }
             }
         }
+        .onChange(of: currentWarningText) { _, newWarning in
+            warningDebounceTask?.cancel()
+            if newWarning != nil {
+                warningDebounceTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        activeWarningText = newWarning
+                    }
+                }
+            } else {
+                warningDebounceTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(600))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        activeWarningText = nil
+                    }
+                }
+            }
+        }
         .sensoryFeedback(.impact(weight: .medium), trigger: repCount)
         .sensoryFeedback(.success, trigger: goalReached)
         .sensoryFeedback(.success, trigger: readyConfirmed)
         .sensoryFeedback(.impact(weight: .light), trigger: countdownTick)
-        .sensoryFeedback(.warning, trigger: cameraService.displayStanding)
+        .sensoryFeedback(.warning, trigger: activeWarningText)
         .navigationTitle(quest.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -182,10 +203,6 @@ struct PushUpChallengeView: View {
             if cameraService.cameraAvailable {
                 screenBorderGlow(size: size)
             }
-
-            if cameraService.displayStanding && cameraService.cameraAvailable {
-                standingWarningOverlay
-            }
         }
     }
 
@@ -198,35 +215,6 @@ struct PushUpChallengeView: View {
             .opacity(borderGlowOpacity)
             .allowsHitTesting(false)
             .animation(.easeInOut(duration: 0.25), value: borderColor)
-    }
-
-    // MARK: - Standing Warning Overlay
-
-    private var standingWarningOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.55).ignoresSafeArea()
-
-            VStack(spacing: 20) {
-                Image(systemName: "arrow.down.to.line")
-                    .font(.system(size: 72, weight: .bold))
-                    .foregroundStyle(.yellow)
-                    .symbolEffect(.pulse, options: .repeating)
-
-                Text("GET BACK DOWN!")
-                    .font(.system(size: 36, weight: .black, design: .rounded))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-
-                Text("Stand back in push-up position\nto continue tracking")
-                    .font(.title3.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.8))
-                    .multilineTextAlignment(.center)
-            }
-            .padding(32)
-        }
-        .allowsHitTesting(false)
-        .transition(.opacity)
-        .animation(.easeInOut(duration: 0.35), value: cameraService.displayStanding)
     }
 
     // MARK: - Setup Overlay
@@ -380,10 +368,10 @@ struct PushUpChallengeView: View {
     private var cameraActiveHUD: some View {
         VStack {
             VStack(spacing: 6) {
-                if hasActiveWarning {
-                    activeWarningBanners
+                if let warning = activeWarningText {
+                    singleWarningBanner(text: warning)
                 }
-                statsOverlay
+                minimalStatsBar
             }
             .padding(.top, 8)
             .padding(.horizontal, 16)
@@ -395,9 +383,23 @@ struct PushUpChallengeView: View {
 
             Spacer()
 
-            bottomBar
+            if goalReached {
+                Button {
+                    endSession()
+                } label: {
+                    Label("Finish", systemImage: "checkmark.circle.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .scaleEffect(pulseGoal ? 1.03 : 1.0)
                 .padding(.horizontal, 16)
                 .padding(.bottom, 16)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.spring(response: 0.3), value: goalReached)
+            }
         }
         .overlay(alignment: .trailing) {
             if cameraService.cameraAvailable {
@@ -405,7 +407,6 @@ struct PushUpChallengeView: View {
                     .padding(.trailing, 12)
             }
         }
-        .animation(.easeInOut(duration: 0.35), value: hasActiveWarning)
     }
 
     // MARK: - Depth Indicator
@@ -413,8 +414,8 @@ struct PushUpChallengeView: View {
     private var depthIndicator: some View {
         let trackHeight: CGFloat = 180
         let ballSize: CGFloat = 22
-        let greenZone: CGFloat = 0.35
-        let depth = cameraService.shoulderDepthNormalized
+        let greenZone: CGFloat = 0.55
+        let depth = min(1.0, max(0.0, cameraService.shoulderDepthNormalized))
 
         return VStack(spacing: 6) {
             Text("UP")
@@ -448,143 +449,40 @@ struct PushUpChallengeView: View {
         .background(.black.opacity(0.3), in: .rect(cornerRadius: 12))
     }
 
-    // MARK: - Warning Banners (Large)
+    // MARK: - Warning Banner
 
-    private var activeWarningBanners: some View {
-        VStack(spacing: 8) {
-            if cameraService.displayStanding {
-                largeWarningBanner(
-                    icon: "figure.stand",
-                    text: "STAND DETECTED — GET DOWN!",
-                    bgColor: .red
-                )
-            }
-
-            if !cameraService.displayBodyDetected {
-                largeWarningBanner(
-                    icon: "person.fill.xmark",
-                    text: "BODY NOT DETECTED",
-                    bgColor: .red
-                )
-            }
-
-            if !cameraService.displayHeadDetected && cameraService.displayBodyDetected {
-                largeWarningBanner(
-                    icon: "eye.slash.fill",
-                    text: "HEAD NOT VISIBLE",
-                    bgColor: .orange
-                )
-            }
-
-            if cameraService.displayKneesOnGround && !cameraService.displayStanding {
-                largeWarningBanner(
-                    icon: "exclamationmark.triangle.fill",
-                    text: "KNEES OFF THE GROUND!",
-                    bgColor: .red
-                )
-            }
-
-            if !cameraService.displayFormGood && !cameraService.displayKneesOnGround && !cameraService.displayStanding && cameraService.displayBodyDetected {
-                largeWarningBanner(
-                    icon: "xmark.circle.fill",
-                    text: "FIX YOUR FORM",
-                    bgColor: .orange
-                )
-            }
-        }
-        .transition(.move(edge: .top).combined(with: .opacity))
-    }
-
-    private func largeWarningBanner(icon: String, text: String, bgColor: Color) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title2.weight(.bold))
-                .foregroundStyle(.white)
-
+    private func singleWarningBanner(text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.bold))
             Text(text)
-                .font(.title3.weight(.heavy))
-                .foregroundStyle(.white)
+                .font(.subheadline.weight(.heavy))
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity)
-        .background(bgColor.opacity(0.85), in: .rect(cornerRadius: 14))
-        .transition(.move(edge: .top).combined(with: .opacity))
+        .background(Color.red.opacity(0.85), in: .rect(cornerRadius: 12))
+        .transition(.opacity)
     }
 
-    private var statsOverlay: some View {
+    private var minimalStatsBar: some View {
         HStack(spacing: 8) {
-            bodyDetectionBadge
-
-            Spacer()
+            Circle()
+                .fill(cameraService.displayBodyDetected ? Color.green : Color.red)
+                .frame(width: 8, height: 8)
 
             Text(formatDuration(elapsedSeconds))
                 .font(.subheadline.monospacedDigit().weight(.semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.black.opacity(0.5), in: Capsule())
 
             Spacer()
-
-            formBadge
-
-            phaseBadge
         }
-    }
-
-    private var bodyDetectionBadge: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(cameraService.displayBodyDetected ? Color.green : Color.red)
-                .frame(width: 8, height: 8)
-            Text(cameraService.displayBodyDetected ? "Tracking" : "No Body")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.black.opacity(0.5), in: Capsule())
-        .animation(.easeInOut(duration: 0.3), value: cameraService.displayBodyDetected)
-    }
-
-    private var formBadge: some View {
-        HStack(spacing: 4) {
-            Image(systemName: cameraService.displayFormGood ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .font(.caption2)
-            Text("Form")
-                .font(.caption2.weight(.semibold))
-        }
-        .foregroundStyle(cameraService.displayFormGood ? .green : .red)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.black.opacity(0.5), in: Capsule())
-        .animation(.easeInOut(duration: 0.3), value: cameraService.displayFormGood)
-    }
-
-    private var phaseBadge: some View {
-        Text(cameraService.pushUpPhaseLabel)
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                phaseBadgeColor.opacity(0.7),
-                in: Capsule()
-            )
-            .animation(.easeInOut(duration: 0.2), value: cameraService.pushUpPhaseLabel)
-    }
-
-    private var phaseBadgeColor: Color {
-        switch cameraService.pushUpPhaseLabel {
-        case "Down": return .orange
-        case "Fix Form!", "Standing", "Get Down": return .red
-        default: return .green
-        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.4), in: Capsule())
     }
 
     private var repRing: some View {
@@ -616,37 +514,6 @@ struct PushUpChallengeView: View {
             }
         }
         .shadow(color: .black.opacity(0.3), radius: 12, y: 4)
-    }
-
-    private var bottomBar: some View {
-        VStack(spacing: 10) {
-            if goalReached {
-                Button {
-                    endSession()
-                } label: {
-                    Label("Finish", systemImage: "checkmark.circle.fill")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .scaleEffect(pulseGoal ? 1.03 : 1.0)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-
-            Button {
-                manualCountRep()
-            } label: {
-                Label("Tap to Add Rep", systemImage: "hand.tap.fill")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(.white.opacity(0.2), in: Capsule())
-            }
-        }
-        .animation(.spring(response: 0.3), value: goalReached)
     }
 
     private var manualFallback: some View {
@@ -821,6 +688,7 @@ struct PushUpChallengeView: View {
         startTime = Date()
         elapsedSeconds = 0
         borderGlowOpacity = 0
+        activeWarningText = nil
         startTimer()
         phase = .active
     }
