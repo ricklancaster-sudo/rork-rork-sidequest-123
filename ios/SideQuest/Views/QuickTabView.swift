@@ -920,7 +920,7 @@ struct QuickTabView: View {
                 return image
             }
         }
-        let assetPair = QuestAssetMapping.assets(for: instance.quest.title)
+        guard let assetPair = QuestAssetMapping.assetsIfMapped(for: instance.quest.title) else { return nil }
         return loadQuestIcon(assetPair.icon)
     }
 

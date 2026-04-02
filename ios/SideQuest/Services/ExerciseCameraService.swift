@@ -83,6 +83,7 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     nonisolated(unsafe) private var _postureGoodFrames: Int = 0
     nonisolated(unsafe) private var _postureBadFrames: Int = 0
     nonisolated(unsafe) private var _postureEverConfirmed: Bool = false
+    nonisolated(unsafe) private var _standingConsecutiveFrames: Int = 0
     nonisolated(unsafe) private var _lastValidDepth: CGFloat = 1.0
     nonisolated(unsafe) private var _trackingLostFrames: Int = 0
     nonisolated(unsafe) private var _calibrationFrames: Int = 0
@@ -218,6 +219,7 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         _postureGoodFrames = 0
         _postureBadFrames = 0
         _postureEverConfirmed = false
+        _standingConsecutiveFrames = 0
         _lastValidDepth = 1.0
         _trackingLostFrames = 0
         _calibrationFrames = 0
@@ -251,6 +253,7 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         _formDisplayGoodFrames = 0
         _stableKneesOnGround = false
         _stableFormGood = true
+        _standingConsecutiveFrames = 0
         pushUpPhaseLabel = "Ready"
         kneesOnGround = false
         formGood = true
@@ -415,6 +418,15 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             let ankleMid = Self.midpoint(smoothed["leftAnkle"], smoothed["rightAnkle"])
             let hipToAnkleVert = ankleMid.map { abs(hMid.y - $0.y) } ?? 0
             standingDetected = verticalDiff > 0.22 && horizontalDiff < 0.12 && hipToAnkleVert > 0.15
+            if !standingDetected && verticalDiff > 0.20 && horizontalDiff < 0.15 {
+                standingDetected = true
+            }
+        }
+        if !standingDetected, let sMid = shoulderMid, let wMid = Self.midpoint(smoothed["leftWrist"], smoothed["rightWrist"]) {
+            let wristBelowShoulder = wMid.y - sMid.y
+            if wristBelowShoulder > 0.25 {
+                standingDetected = true
+            }
         }
 
         var pushUpPosture = false
@@ -437,6 +449,22 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             _postureEverConfirmed = true
         }
         if _postureBadFrames >= (postureDebounceFrames * 5) { _pushUpPostureActive = false }
+        if standingDetected {
+            _standingConsecutiveFrames += 1
+        } else {
+            _standingConsecutiveFrames = 0
+        }
+        if _standingConsecutiveFrames >= 20 && _postureEverConfirmed {
+            _postureEverConfirmed = false
+            _pushUpPostureActive = false
+            _pushUpPhase = 0
+            _downFrameCount = 0
+            _upFrameCount = 0
+            _heightHistory = []
+            _maxHeightDiff = 0
+            _calibrationFrames = 0
+            _lastValidDepth = 1.0
+        }
 
         let hasArms = (smoothed["leftElbow"] != nil || smoothed["rightElbow"] != nil) &&
                       (smoothed["leftWrist"] != nil || smoothed["rightWrist"] != nil)
@@ -447,7 +475,8 @@ class ExerciseCameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
 
         let hasShoulders = smoothed["leftShoulder"] != nil || smoothed["rightShoulder"] != nil
         let hasWrists = smoothed["leftWrist"] != nil || smoothed["rightWrist"] != nil
-        let canTrackReps = hasShoulders && hasWrists && !standingDetected && (_pushUpPostureActive || _postureEverConfirmed)
+        let hasMinRange = _maxHeightDiff >= 0.02
+        let canTrackReps = hasShoulders && hasWrists && !standingDetected && (_pushUpPostureActive || _postureEverConfirmed) && (hasMinRange || _calibrationFrames < 25)
 
         let wristMid = Self.midpoint(smoothed["leftWrist"], smoothed["rightWrist"])
 

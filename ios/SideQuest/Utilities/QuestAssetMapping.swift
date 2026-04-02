@@ -16,6 +16,12 @@ nonisolated enum QuestAssetMapping {
         return assetPairs["054"]!
     }
 
+    static func assetsIfMapped(for questTitle: String) -> QuestAssetPair? {
+        let normalized = normalizeTitle(questTitle)
+        guard let key = titleToKey[normalized] else { return nil }
+        return assetPairs[key]
+    }
+
     static func assets(forFallbackBannerAsset fallbackBannerAsset: String) -> QuestAssetPair {
         let normalizedBanner = fallbackBannerAsset.replacingOccurrences(of: ".jpg", with: "")
         let iconBase = normalizedBanner.replacingOccurrences(of: "_realism", with: "")
