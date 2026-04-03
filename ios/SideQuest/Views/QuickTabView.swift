@@ -606,7 +606,7 @@ struct QuickTabView: View {
                             .frame(width: 146, height: 260)
                             .allowsHitTesting(false)
                             .scaleEffect(0.92, anchor: .bottom)
-                            .offset(x: 8, y: 48)
+                            .offset(x: 8, y: 78)
                         }
 
                     VStack(alignment: .leading, spacing: 0) {
