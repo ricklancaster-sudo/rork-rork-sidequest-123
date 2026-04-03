@@ -40,6 +40,7 @@ struct MapExploreView: View {
     @State private var isPreparingMapWorld: Bool = false
     @State private var selectedMapFilter: MapExploreFilter = .all
     @State private var currentVisibleRadius: Double = 2000
+    @State private var mapCameraCenter: CLLocationCoordinate2D?
     @State private var groupedEventsSheet: [ExternalEvent]?
 
 
@@ -255,11 +256,12 @@ struct MapExploreView: View {
     }
 
     private var externalEventRadiusMeters: Double {
-        max(currentVisibleRadius * 1.5, 50_000)
+        max(currentVisibleRadius * 2.0, 50_000)
     }
 
     private func buildExternalEventEncounters(normalizedMapEvents: [ExternalEvent]) -> [ExploreEncounter] {
-        let centerLocation = CLLocation(latitude: centerCoordinate.latitude, longitude: centerCoordinate.longitude)
+        let filterCenter = mapCameraCenter ?? centerCoordinate
+        let centerLocation = CLLocation(latitude: filterCenter.latitude, longitude: filterCenter.longitude)
 
         let visibleEvents = normalizedMapEvents
             .filter { shouldShowExternalEventOnMap($0, centerLocation: centerLocation) }
@@ -346,18 +348,19 @@ struct MapExploreView: View {
 
         for event in events {
             guard !assigned.contains(event.id) else { continue }
-            guard let coord = eventCoordinate(event) else { continue }
+            guard eventCoordinate(event) != nil else { continue }
 
             var group: [ExternalEvent] = [event]
             assigned.insert(event.id)
 
-            for other in events where !assigned.contains(other.id) {
-                guard let otherCoord = eventCoordinate(other) else { continue }
-                let dist = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
-                    .distance(from: CLLocation(latitude: otherCoord.latitude, longitude: otherCoord.longitude))
-                if dist < 200 {
-                    group.append(other)
-                    assigned.insert(other.id)
+            let eventAddressKey = normalizedAddressKey(for: event)
+            if let eventAddressKey {
+                for other in events where !assigned.contains(other.id) {
+                    guard eventCoordinate(other) != nil else { continue }
+                    if let otherKey = normalizedAddressKey(for: other), otherKey == eventAddressKey {
+                        group.append(other)
+                        assigned.insert(other.id)
+                    }
                 }
             }
 
@@ -367,6 +370,13 @@ struct MapExploreView: View {
             groups.append(group)
         }
         return groups
+    }
+
+    private func normalizedAddressKey(for event: ExternalEvent) -> String? {
+        guard let address = event.addressLine1?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !address.isEmpty else { return nil }
+        return address.lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
     }
 
     private var externalEventDiagnosticsSignature: String {
@@ -500,7 +510,8 @@ struct MapExploreView: View {
             }
             .sorted()
             .joined(separator: ",")
-        let locationKey = "\(String(format: "%.4f", centerCoordinate.latitude)):\(String(format: "%.4f", centerCoordinate.longitude))"
+        let cameraCenter = mapCameraCenter ?? centerCoordinate
+        let locationKey = "\(String(format: "%.4f", cameraCenter.latitude)):\(String(format: "%.4f", cameraCenter.longitude))"
         let countdownBucket = Int(eventCountdownNow.timeIntervalSince1970 / 30)
         return [
             poiKey,
@@ -1373,6 +1384,7 @@ struct MapExploreView: View {
         guard hasLoadedInitialWorld else { return }
 
         currentVisibleRadius = visibleRadius
+        mapCameraCenter = center
 
         if let prefetchCenter, prefetchRadius > 0 {
             let distFromPrefetchCenter = CLLocation(latitude: prefetchCenter.latitude, longitude: prefetchCenter.longitude)
