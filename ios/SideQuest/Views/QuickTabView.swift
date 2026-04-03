@@ -1026,21 +1026,21 @@ struct QuickTabView: View {
         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.white.opacity(0.08), lineWidth: 1))
     }
 
-    private var forYouQuests: [Quest] {
-        let active = Set(appState.activeInstances.map { $0.quest.id })
-        let completed = appState.questCompletionCounts
-        return appState.allQuests
-            .filter { $0.type == .verified && !$0.id.hasPrefix("external_event_") && !active.contains($0.id) }
-            .sorted { a, b in
-                let aCount = completed[a.id] ?? 0
-                let bCount = completed[b.id] ?? 0
-                if aCount != bCount { return aCount < bCount }
-                return a.xpReward > b.xpReward
+    private var forYouQuestsSection: some View {
+        let isOnboarded = appState.hasTagsConfigured || appState.onboardingData.isComplete
+
+        return Group {
+            if isOnboarded {
+                forYouQuestsSectionContent
             }
+        }
     }
 
-    private var forYouQuestsSection: some View {
-        let quests = Array(forYouQuests.prefix(8))
+    private var forYouQuestsSectionContent: some View {
+        let context = appState.buildPlayerContext()
+        let eligible = appState.allQuests.filter { $0.type != .master }
+        let picks = PersonalizationEngine.todaysPicks(from: eligible, context: context, count: 8)
+
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("FOR YOU")
@@ -1051,7 +1051,7 @@ struct QuickTabView: View {
             }
             .padding(.horizontal, 16)
 
-            if quests.isEmpty {
+            if picks.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "sparkles")
                         .font(.largeTitle)
@@ -1068,12 +1068,12 @@ struct QuickTabView: View {
             } else {
                 ScrollView(.horizontal) {
                     HStack(spacing: 12) {
-                        ForEach(quests) { quest in
+                        ForEach(picks) { quest in
                             Button {
                                 selectedQuest = quest
                             } label: {
                                 QuestCardView(quest: quest, showCompletionCount: false)
-                                    .frame(width: 220)
+                                    .frame(width: 304)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -1084,88 +1084,6 @@ struct QuickTabView: View {
                 .contentMargins(.horizontal, 16)
             }
         }
-    }
-
-    private func forYouQuestCard(_ quest: Quest) -> some View {
-        let pathColor = PathColorHelper.color(for: quest.path)
-        let streakMult = LevelSystem.streakMultiplier(for: appState.profile.currentStreak)
-
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: quest.path.iconName)
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(pathColor)
-                    .frame(width: 28, height: 28)
-                    .background(pathColor.opacity(0.15), in: .rect(cornerRadius: 7))
-
-                Text(quest.path.rawValue)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(pathColor)
-                    .textCase(.uppercase)
-
-                Spacer(minLength: 0)
-
-                if quest.type == .verified {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.blue.opacity(0.7))
-                }
-            }
-
-            Text(quest.title)
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: 6) {
-                HStack(spacing: 3) {
-                    Image(systemName: "bolt.fill")
-                        .font(.system(size: 9))
-                    Text("\(Int(Double(quest.xpReward) * streakMult))")
-                        .font(.system(size: 11, weight: .bold).monospacedDigit())
-                }
-                .foregroundStyle(.orange)
-
-                HStack(spacing: 3) {
-                    Image(systemName: "dollarsign.circle.fill")
-                        .font(.system(size: 9))
-                    Text("\(Int(Double(quest.goldReward) * streakMult))")
-                        .font(.system(size: 11, weight: .bold).monospacedDigit())
-                }
-                .foregroundStyle(.yellow)
-
-                if quest.diamondReward > 0 {
-                    HStack(spacing: 3) {
-                        Image(systemName: "diamond.fill")
-                            .font(.system(size: 9))
-                        Text("\(quest.diamondReward)")
-                            .font(.system(size: 11, weight: .bold).monospacedDigit())
-                    }
-                    .foregroundStyle(.cyan)
-                }
-            }
-
-            Text(quest.difficulty.rawValue)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.white.opacity(0.6))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color(white: 1, opacity: 0.08), in: Capsule())
-        }
-        .padding(12)
-        .frame(height: 160)
-        .background(
-            LinearGradient(
-                colors: [pathColor.opacity(0.12), homeCardBg],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: .rect(cornerRadius: 14)
-        )
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(pathColor.opacity(0.18), lineWidth: 1))
     }
 
     private var liveEventsUpdatingBadge: some View {
