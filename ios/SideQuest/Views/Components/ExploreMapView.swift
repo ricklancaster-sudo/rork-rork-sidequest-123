@@ -488,8 +488,8 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         canShowCallout = false
         centerOffset = CGPoint(x: 0, y: -40)
-        collisionMode = .circle
-        displayPriority = .defaultHigh
+        collisionMode = .none
+        displayPriority = .required
         frame = CGRect(x: 0, y: 0, width: 64, height: 88)
         backgroundColor = .clear
         setupViews()
@@ -615,8 +615,7 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
             buildingImageView.transform = .identity
         }
 
-        let isCafe = encounter.poi.category == .cafe
-        displayPriority = isHigh ? .required : (isCafe ? .defaultHigh : .defaultLow)
+        displayPriority = .required
         clusteringIdentifier = nil
 
         animateStructure(highPriority: isHigh)
