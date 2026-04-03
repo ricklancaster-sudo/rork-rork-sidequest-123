@@ -82,11 +82,13 @@ struct QuickTabView: View {
     @State private var isHomePullRefreshing: Bool = false
     @State private var homePullHasTriggered: Bool = false
     @State private var isHomePullRefreshArmed: Bool = false
+    @State private var showDevOverlay: Bool = false
+    @State private var devConfig: Character3DDevConfig = Character3DDevConfig()
 
-    private let devFrameW: CGFloat = 180
-    private let devFrameH: CGFloat = 300
-    private let devClipW: CGFloat = 146
-    private let devClipH: CGFloat = 154
+    private var devFrameW: CGFloat { CGFloat(devConfig.frameW) }
+    private var devFrameH: CGFloat { CGFloat(devConfig.frameH) }
+    private var devClipW: CGFloat { CGFloat(devConfig.clipW) }
+    private var devClipH: CGFloat { CGFloat(devConfig.clipH) }
 
     var body: some View {
         NavigationStack {
@@ -118,6 +120,34 @@ struct QuickTabView: View {
                     .padding(.bottom, 24)
                 }
                 homePullToRefreshHeader
+
+                VStack {
+                    Spacer()
+                    Character3DDevOverlay(config: $devConfig, isVisible: $showDevOverlay)
+                        .padding(.bottom, 100)
+                }
+                .ignoresSafeArea()
+
+                if !showDevOverlay {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Button {
+                                showDevOverlay = true
+                            } label: {
+                                Image(systemName: "wrench.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.white)
+                                    .frame(width: 32, height: 32)
+                                    .background(Color.black.opacity(0.6), in: Circle())
+                            }
+                            .padding(.trailing, 16)
+                            .padding(.bottom, 100)
+                        }
+                    }
+                    .ignoresSafeArea()
+                }
             }
             .coordinateSpace(name: "quickHomeScroll")
             .onPreferenceChange(QuickHomePullOffsetPreferenceKey.self) { offset in
