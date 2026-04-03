@@ -85,18 +85,18 @@ struct QuickTabView: View {
 
     @State private var showDevPanel: Bool = false
     @AppStorage("dev3DCamX") private var dev3DCamX: Double = 0
-    @AppStorage("dev3DCamY") private var dev3DCamY: Double = 8.5
+    @AppStorage("dev3DCamY") private var dev3DCamY: Double = 0
     @AppStorage("dev3DCamZ") private var dev3DCamZ: Double = 0
     @AppStorage("dev3DModelX") private var dev3DModelX: Double = 0
-    @AppStorage("dev3DModelY") private var dev3DModelY: Double = -10
+    @AppStorage("dev3DModelY") private var dev3DModelY: Double = 0
     @AppStorage("dev3DModelZ") private var dev3DModelZ: Double = 0
-    @AppStorage("dev3DTargetX") private var dev3DTargetX: Double = -4
-    @AppStorage("dev3DTargetY") private var dev3DTargetY: Double = 10
-    @AppStorage("dev3DTargetZ") private var dev3DTargetZ: Double = -10
-    @AppStorage("dev3DFOV") private var dev3DFOV: Double = 40
-    @AppStorage("devFrameW") private var devFrameW: Double = 176
-    @AppStorage("devFrameH") private var devFrameH: Double = 123
-    @AppStorage("devClipW") private var devClipW: Double = 124
+    @AppStorage("dev3DTargetX") private var dev3DTargetX: Double = 0
+    @AppStorage("dev3DTargetY") private var dev3DTargetY: Double = 0
+    @AppStorage("dev3DTargetZ") private var dev3DTargetZ: Double = 0
+    @AppStorage("dev3DFOV") private var dev3DFOV: Double = 0
+    @AppStorage("devFrameW") private var devFrameW: Double = 180
+    @AppStorage("devFrameH") private var devFrameH: Double = 300
+    @AppStorage("devClipW") private var devClipW: Double = 146
     @AppStorage("devClipH") private var devClipH: Double = 154
 
     var body: some View {
@@ -153,6 +153,9 @@ struct QuickTabView: View {
                 }
                 .padding(.leading, 16)
                 .padding(.top, 58)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .character3DSceneReady)) { _ in
+                sendAllDevValues()
             }
 
             .sheet(isPresented: $showStepsDetail) {
@@ -682,10 +685,10 @@ struct QuickTabView: View {
                 .foregroundStyle(.green)
 
                 Button("Reset All") {
-                    dev3DCamX = 0; dev3DCamY = 8.5; dev3DCamZ = 0
-                    dev3DModelX = 0; dev3DModelY = -10; dev3DModelZ = 0
-                    dev3DTargetX = -4; dev3DTargetY = 10; dev3DTargetZ = -10
-                    dev3DFOV = 40
+                    dev3DCamX = 0; dev3DCamY = 0; dev3DCamZ = 0
+                    dev3DModelX = 0; dev3DModelY = 0; dev3DModelZ = 0
+                    dev3DTargetX = 0; dev3DTargetY = 0; dev3DTargetZ = 0
+                    dev3DFOV = 0
                     sendDevCam(); sendDevModel(); sendDevTarget(); sendDevFOV()
                 }
                 .font(.caption.weight(.semibold))
@@ -722,7 +725,15 @@ struct QuickTabView: View {
     }
 
     private func sendDevFOV() {
+        guard dev3DFOV > 0 else { return }
         sendDevJS("window._devFOV && window._devFOV(\(dev3DFOV))")
+    }
+
+    private func sendAllDevValues() {
+        sendDevCam()
+        sendDevModel()
+        sendDevTarget()
+        sendDevFOV()
     }
 
     private func dev3DSlider(label: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double = 0.01, onChange: @escaping () -> Void) -> some View {

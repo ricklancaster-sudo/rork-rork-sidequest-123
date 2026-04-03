@@ -49,4 +49,5 @@ class PushNotificationDelegate: NSObject, UNUserNotificationCenterDelegate, @unc
 extension Notification.Name {
     static let pushNotificationTapped = Notification.Name("pushNotificationTapped")
     static let character3DDevCommand = Notification.Name("character3DDevCommand")
+    static let character3DSceneReady = Notification.Name("character3DSceneReady")
 }

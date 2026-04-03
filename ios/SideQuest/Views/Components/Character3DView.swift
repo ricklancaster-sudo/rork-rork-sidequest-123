@@ -338,6 +338,7 @@ private struct CharacterWebView: UIViewRepresentable {
                     lookupNotes.wrappedValue = notes
                 }
                 webView?.evaluateJavaScript("window._devCapture && window._devCapture()")
+                NotificationCenter.default.post(name: .character3DSceneReady, object: nil)
             case "init":
                 isReady = false
                 isPreviewReady.wrappedValue = false

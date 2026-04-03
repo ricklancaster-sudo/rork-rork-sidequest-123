@@ -495,10 +495,14 @@ var _devModelOff = {x:0, y:0, z:0};
 var _devTargetOff = {x:0, y:0, z:0};
 var _devBaseCam = null;
 var _devBaseTarget = null;
+var _devBaseModel = null;
 
 window._devCapture = function() {
     _devBaseCam = {x: camera.position.x, y: camera.position.y, z: camera.position.z};
     _devBaseTarget = {x: ctrl.target.x, y: ctrl.target.y, z: ctrl.target.z};
+    if (model && !_devBaseModel) {
+        _devBaseModel = {x: model.position.x, y: model.position.y, z: model.position.z};
+    }
 };
 
 window._devCam = function(dx, dy, dz) {
@@ -511,13 +515,8 @@ window._devCam = function(dx, dy, dz) {
 
 window._devModel = function(dx, dy, dz) {
     _devModelOff = {x: dx, y: dy, z: dz};
-    if (model) {
-        model.updateWorldMatrix(true, true);
-        var b = new THREE.Box3().setFromObject(model);
-        var c = b.getCenter(new THREE.Vector3());
-        model.position.x = -c.x + dx;
-        model.position.y = -b.min.y + dy;
-        model.position.z = -c.z + dz;
+    if (model && _devBaseModel) {
+        model.position.set(_devBaseModel.x + dx, _devBaseModel.y + dy, _devBaseModel.z + dz);
     }
 };
 
