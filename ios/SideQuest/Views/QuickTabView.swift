@@ -82,7 +82,7 @@ struct QuickTabView: View {
     @State private var isHomePullRefreshing: Bool = false
     @State private var homePullHasTriggered: Bool = false
     @State private var isHomePullRefreshArmed: Bool = false
-    @State private var showDevOverlay: Bool = false
+    @State private var showDevOverlay: Bool = false // deactivated
     @State private var devConfig: Character3DDevConfig = Character3DDevConfig()
 
     private var devFrameW: CGFloat { CGFloat(devConfig.frameW) }
@@ -121,33 +121,7 @@ struct QuickTabView: View {
                 }
                 homePullToRefreshHeader
 
-                VStack {
-                    Spacer()
-                    Character3DDevOverlay(config: $devConfig, isVisible: $showDevOverlay)
-                        .padding(.bottom, 100)
-                }
-                .ignoresSafeArea()
 
-                if !showDevOverlay {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            Button {
-                                showDevOverlay = true
-                            } label: {
-                                Image(systemName: "wrench.fill")
-                                    .font(.caption)
-                                    .foregroundStyle(.white)
-                                    .frame(width: 32, height: 32)
-                                    .background(Color.black.opacity(0.6), in: Circle())
-                            }
-                            .padding(.trailing, 16)
-                            .padding(.bottom, 100)
-                        }
-                    }
-                    .ignoresSafeArea()
-                }
             }
             .coordinateSpace(name: "quickHomeScroll")
             .onPreferenceChange(QuickHomePullOffsetPreferenceKey.self) { offset in

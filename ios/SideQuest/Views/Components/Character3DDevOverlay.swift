@@ -1,16 +1,16 @@
 import SwiftUI
 
 nonisolated struct Character3DDevConfig: Codable, Sendable, Equatable {
-    var camY: Double = 0
-    var mdlY: Double = 0
-    var tgtX: Double = 0
+    var camY: Double = 1.5
+    var mdlY: Double = 25
+    var tgtX: Double = 0.5
     var tgtY: Double = 0
     var tgtZ: Double = 0
-    var fov: Double = 32
-    var scale: Double = 1.0
+    var fov: Double = 25
+    var scale: Double = 0.3
     var frameW: Double = 180
     var frameH: Double = 300
-    var clipW: Double = 146
+    var clipW: Double = 150
     var clipH: Double = 154
 
     nonisolated func jsonString() -> String {
