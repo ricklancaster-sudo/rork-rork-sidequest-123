@@ -11,11 +11,19 @@ private struct MapWorldSnapshot {
 private struct ViewportPOIRequest: Equatable {
     let center: CLLocationCoordinate2D
     let visibleRadius: Double
+    let northEast: CLLocationCoordinate2D
+    let northWest: CLLocationCoordinate2D
+    let southEast: CLLocationCoordinate2D
+    let southWest: CLLocationCoordinate2D
 
     static func == (lhs: ViewportPOIRequest, rhs: ViewportPOIRequest) -> Bool {
         abs(lhs.center.latitude - rhs.center.latitude) < 0.0001
             && abs(lhs.center.longitude - rhs.center.longitude) < 0.0001
             && abs(lhs.visibleRadius - rhs.visibleRadius) < 1
+            && abs(lhs.northEast.latitude - rhs.northEast.latitude) < 0.0001
+            && abs(lhs.northEast.longitude - rhs.northEast.longitude) < 0.0001
+            && abs(lhs.southWest.latitude - rhs.southWest.latitude) < 0.0001
+            && abs(lhs.southWest.longitude - rhs.southWest.longitude) < 0.0001
     }
 }
 
@@ -77,6 +85,7 @@ struct MapExploreView: View {
     @State private var selectedMapFilter: MapExploreFilter = .all
     @State private var currentVisibleRadius: Double = 2000
     @State private var mapCameraCenter: CLLocationCoordinate2D?
+    @State private var currentViewport: ExploreMapViewport?
     @State private var groupedEventsSheet: [ExternalEvent]?
     @State private var cachedPOITiles: [String: [MapPOI]] = [:]
     @State private var pendingViewportPOILoadTask: Task<Void, Never>?
@@ -619,8 +628,8 @@ struct MapExploreView: View {
                 onSelectEncounter: { encounter in
                     presentEncounter(encounter)
                 },
-                onRegionChanged: { center, visibleRadius in
-                    handleRegionChanged(center: center, visibleRadius: visibleRadius)
+                onRegionChanged: { viewport in
+                    handleRegionChanged(viewport)
                 }
             )
             .ignoresSafeArea(edges: .top)
@@ -1131,7 +1140,8 @@ struct MapExploreView: View {
 
     private func reloadNearbyQuests(
         near location: CLLocation? = nil,
-        visibleRadius: Double? = nil
+        visibleRadius: Double? = nil,
+        viewport: ExploreMapViewport? = nil
     ) async {
         let searchLocation: CLLocation = {
             if usesPreviewLocation,
@@ -1154,7 +1164,8 @@ struct MapExploreView: View {
             around: searchLocation.coordinate,
             visibleRadius: effectiveVisibleRadius,
             searchRadius: tileSearchRadius,
-            categories: categories
+            categories: categories,
+            viewport: viewport ?? currentViewport
         )
         let hasFocusedCategory = hasExplicitCategoryFocus
         let focusedCategory = selectedCategory
@@ -1452,24 +1463,26 @@ struct MapExploreView: View {
         )
     }
 
-    private func handleRegionChanged(center: CLLocationCoordinate2D, visibleRadius: Double) {
-        let radiusDelta = abs(currentVisibleRadius - visibleRadius)
-        currentVisibleRadius = visibleRadius
-        mapCameraCenter = center
+    private func handleRegionChanged(_ viewport: ExploreMapViewport) {
+        let previousRadius = currentVisibleRadius
+        let radiusDelta = abs(previousRadius - viewport.visibleRadius)
+        currentVisibleRadius = viewport.visibleRadius
+        mapCameraCenter = viewport.center
+        currentViewport = viewport
 
         let lastCenter = lastViewportPOIRequest?.center
         let movementDistance: CLLocationDistance = {
             guard let lastCenter else { return .greatestFiniteMagnitude }
             return CLLocation(latitude: lastCenter.latitude, longitude: lastCenter.longitude)
-                .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
+                .distance(from: CLLocation(latitude: viewport.center.latitude, longitude: viewport.center.longitude))
         }()
-        let movementThreshold = max(visibleRadius * 0.28, 1_200)
-        let shouldRefreshViewport = radiusDelta > max(currentVisibleRadius * 0.2, 1_500)
+        let movementThreshold = max(viewport.visibleRadius * 0.18, 3_000)
+        let shouldRefreshViewport = radiusDelta > max(previousRadius * 0.12, 2_500)
             || movementDistance > movementThreshold
             || mixedPOIs.isEmpty
 
         guard shouldRefreshViewport else { return }
-        scheduleViewportDrivenPOILoad(center: center, visibleRadius: visibleRadius)
+        scheduleViewportDrivenPOILoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
     }
 
     private func openInMaps(poi: MapPOI) {
@@ -1517,17 +1530,25 @@ struct MapExploreView: View {
         visibleRadius: Double,
         force: Bool = false
     ) {
-        let nextRequest = ViewportPOIRequest(center: center, visibleRadius: visibleRadius)
+        let viewport = currentViewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
+        let nextRequest = ViewportPOIRequest(
+            center: center,
+            visibleRadius: visibleRadius,
+            northEast: viewport.northEast,
+            northWest: viewport.northWest,
+            southEast: viewport.southEast,
+            southWest: viewport.southWest
+        )
         if !force, nextRequest == lastViewportPOIRequest {
             return
         }
         lastViewportPOIRequest = nextRequest
         pendingViewportPOILoadTask?.cancel()
         pendingViewportPOILoadTask = Task {
-            try? await Task.sleep(for: .milliseconds(180))
+            try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
             let location = CLLocation(latitude: center.latitude, longitude: center.longitude)
-            await reloadNearbyQuests(near: location, visibleRadius: visibleRadius)
+            await reloadNearbyQuests(near: location, visibleRadius: visibleRadius, viewport: viewport)
         }
     }
 
@@ -1535,21 +1556,11 @@ struct MapExploreView: View {
         around center: CLLocationCoordinate2D,
         visibleRadius: Double,
         searchRadius: Double,
-        categories: [MapQuestCategory]
+        categories: [MapQuestCategory],
+        viewport: ExploreMapViewport?
     ) -> [POITileDescriptor] {
-        let anchorOffsets: [(Double, Double)] = {
-            if visibleRadius < 6_000 {
-                return [(0, 0)]
-            }
-            if visibleRadius < 18_000 {
-                let stride = visibleRadius * 0.7
-                return [(0, 0), (stride, 0), (-stride, 0), (0, stride), (0, -stride)]
-            }
-            let stride = min(visibleRadius * 0.8, 80_000)
-            return [(0, 0), (stride, 0), (-stride, 0), (0, stride), (0, -stride), (stride, stride), (stride, -stride), (-stride, stride), (-stride, -stride)]
-        }()
-
-        let bucketMeters = max(searchRadius * 0.9, 1_000)
+        let anchors = viewportAnchors(for: viewport, center: center, visibleRadius: visibleRadius)
+        let bucketMeters = max(searchRadius * 0.75, 1_000)
         let latitudeStep = bucketMeters / 111_320
         let safeCosine = max(cos(center.latitude * .pi / 180), 0.2)
         let longitudeStep = bucketMeters / (111_320 * safeCosine)
@@ -1558,8 +1569,7 @@ struct MapExploreView: View {
         var descriptors: [POITileDescriptor] = []
 
         for category in categories {
-            for (northMeters, eastMeters) in anchorOffsets {
-                let anchor = offsetCoordinate(from: center, northMeters: northMeters, eastMeters: eastMeters)
+            for anchor in anchors {
                 let descriptor = POITileDescriptor(
                     category: category,
                     center: anchor,
@@ -1574,6 +1584,76 @@ struct MapExploreView: View {
         }
 
         return descriptors
+    }
+
+    private func viewportAnchors(
+        for viewport: ExploreMapViewport?,
+        center: CLLocationCoordinate2D,
+        visibleRadius: Double
+    ) -> [CLLocationCoordinate2D] {
+        guard let viewport else {
+            let fallback = fallbackViewport(center: center, visibleRadius: visibleRadius)
+            return [
+                fallback.center,
+                fallback.northEast,
+                fallback.northWest,
+                fallback.southEast,
+                fallback.southWest
+            ]
+        }
+
+        let northMid = CLLocationCoordinate2D(
+            latitude: (viewport.northEast.latitude + viewport.northWest.latitude) / 2,
+            longitude: (viewport.northEast.longitude + viewport.northWest.longitude) / 2
+        )
+        let southMid = CLLocationCoordinate2D(
+            latitude: (viewport.southEast.latitude + viewport.southWest.latitude) / 2,
+            longitude: (viewport.southEast.longitude + viewport.southWest.longitude) / 2
+        )
+        let eastMid = CLLocationCoordinate2D(
+            latitude: (viewport.northEast.latitude + viewport.southEast.latitude) / 2,
+            longitude: (viewport.northEast.longitude + viewport.southEast.longitude) / 2
+        )
+        let westMid = CLLocationCoordinate2D(
+            latitude: (viewport.northWest.latitude + viewport.southWest.latitude) / 2,
+            longitude: (viewport.northWest.longitude + viewport.southWest.longitude) / 2
+        )
+
+        return [
+            viewport.center,
+            viewport.northEast,
+            viewport.northWest,
+            viewport.southEast,
+            viewport.southWest,
+            northMid,
+            southMid,
+            eastMid,
+            westMid
+        ]
+    }
+
+    private func fallbackViewport(center: CLLocationCoordinate2D, visibleRadius: Double) -> ExploreMapViewport {
+        let northEast = offsetCoordinate(from: center, northMeters: visibleRadius, eastMeters: visibleRadius)
+        let northWest = offsetCoordinate(from: center, northMeters: visibleRadius, eastMeters: -visibleRadius)
+        let southEast = offsetCoordinate(from: center, northMeters: -visibleRadius, eastMeters: visibleRadius)
+        let southWest = offsetCoordinate(from: center, northMeters: -visibleRadius, eastMeters: -visibleRadius)
+        let topLeftPoint = MKMapPoint(northWest)
+        let bottomRightPoint = MKMapPoint(southEast)
+        let mapRect = MKMapRect(
+            x: min(topLeftPoint.x, bottomRightPoint.x),
+            y: min(topLeftPoint.y, bottomRightPoint.y),
+            width: abs(bottomRightPoint.x - topLeftPoint.x),
+            height: abs(bottomRightPoint.y - topLeftPoint.y)
+        )
+        return ExploreMapViewport(
+            center: center,
+            visibleRadius: visibleRadius,
+            northEast: northEast,
+            northWest: northWest,
+            southEast: southEast,
+            southWest: southWest,
+            mapRect: mapRect
+        )
     }
 
     private func applyLoadedPOIs(_ pois: [MapPOI], center: CLLocationCoordinate2D) {

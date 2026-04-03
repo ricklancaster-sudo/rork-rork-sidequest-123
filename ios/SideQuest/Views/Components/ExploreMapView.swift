@@ -2,6 +2,16 @@ import SwiftUI
 import MapKit
 import UIKit
 
+nonisolated struct ExploreMapViewport: Sendable {
+    let center: CLLocationCoordinate2D
+    let visibleRadius: Double
+    let northEast: CLLocationCoordinate2D
+    let northWest: CLLocationCoordinate2D
+    let southEast: CLLocationCoordinate2D
+    let southWest: CLLocationCoordinate2D
+    let mapRect: MKMapRect
+}
+
 struct ExploreMapView: UIViewRepresentable {
     let centerCoordinate: CLLocationCoordinate2D
     let userCoordinate: CLLocationCoordinate2D?
@@ -12,7 +22,7 @@ struct ExploreMapView: UIViewRepresentable {
     let selectedEncounterID: String?
     let command: ExploreMapCommand?
     let onSelectEncounter: @MainActor (ExploreEncounter) -> Void
-    let onRegionChanged: @MainActor (CLLocationCoordinate2D, Double) -> Void
+    let onRegionChanged: @MainActor (ExploreMapViewport) -> Void
 
     func makeCoordinator() -> ExploreMapCoordinator {
         ExploreMapCoordinator(parent: self)
@@ -231,8 +241,8 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
         case .zoomOut:
             let updatedCamera = MKMapCamera(
                 lookingAtCenter: camera.centerCoordinate,
-                fromDistance: min(camera.centerCoordinateDistance * 1.4, 80_000),
-                pitch: max(55 - (camera.centerCoordinateDistance / 2000) * 5, 0),
+                fromDistance: min(camera.centerCoordinateDistance * 1.9, 6_000_000),
+                pitch: max(55 - (camera.centerCoordinateDistance / 30_000) * 6, 0),
                 heading: 0
             )
             mapView.setCamera(updatedCamera, animated: true)
@@ -346,10 +356,23 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
 
     nonisolated func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
         MainActor.assumeIsolated {
-            let center = mapView.centerCoordinate
-            let region = mapView.region
-            let radiusMeters = region.span.latitudeDelta * 111_320 / 2
-            parent.onRegionChanged(center, radiusMeters)
+            let visibleRect = mapView.visibleMapRect
+            let northWest = MKMapPoint(x: visibleRect.minX, y: visibleRect.minY).coordinate
+            let northEast = MKMapPoint(x: visibleRect.maxX, y: visibleRect.minY).coordinate
+            let southWest = MKMapPoint(x: visibleRect.minX, y: visibleRect.maxY).coordinate
+            let southEast = MKMapPoint(x: visibleRect.maxX, y: visibleRect.maxY).coordinate
+            let diagonalDistance = CLLocation(latitude: northWest.latitude, longitude: northWest.longitude)
+                .distance(from: CLLocation(latitude: southEast.latitude, longitude: southEast.longitude))
+            let viewport = ExploreMapViewport(
+                center: mapView.centerCoordinate,
+                visibleRadius: max(diagonalDistance / 2, 800),
+                northEast: northEast,
+                northWest: northWest,
+                southEast: southEast,
+                southWest: southWest,
+                mapRect: visibleRect
+            )
+            parent.onRegionChanged(viewport)
 
             if enablesCafe3DAnnotations && CafeBuildingRenderer.shared.isReady && !hasApplied3DCafe {
                 hasApplied3DCafe = true

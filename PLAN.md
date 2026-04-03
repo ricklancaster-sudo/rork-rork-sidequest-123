@@ -57,6 +57,12 @@ Big-name clubs (Poppy, Sound, Delilah, etc.) aren't showing up because the Disco
 - [x] Nightlife loads at the same speed as Ticketmaster events — instant from Supabase cache
 - [x] Updated `SERVER_INFRASTRUCTURE.md` to reflect new architecture
 
+### 9. Viewport-based map population for Snapchat-style exploration ✅
+- [x] Capture the full visible map viewport from `MKMapView.visibleMapRect` instead of relying on the center radius alone
+- [x] Drive POI tile requests from viewport corners + edge midpoints so zoomed-out map exploration populates the whole camera view, not just the middle
+- [x] Lower viewport reload sensitivity and preserve cached tiles during pan/zoom so map exploration feels instant with no visible loading state
+- [x] Expand max zoom-out distance substantially so the map can roam much farther without feeling artificially constrained
+
 ## What stays the same
 - No hardcoded venue names — everything is 100% scrape-driven (server-side)
 - All existing lighting, camera, and lookdev in the app
