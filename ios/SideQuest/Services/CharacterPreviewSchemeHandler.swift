@@ -407,6 +407,14 @@ function layout(m) {
         camera.updateProjectionMatrix();
         camera.position.set(dist * 0.12, tY, dist * 0.95);
         ctrl.target.set(0, tY, 0);
+        if (isHomeHero) {
+            camera.fov = 25;
+            camera.position.y += 1.5;
+            ctrl.target.x += 0.5;
+            camera.updateProjectionMatrix();
+            m.scale.set(0.3, 0.3, 0.3);
+            m.position.y += 25;
+        }
         ctrl.update();
         return;
     }
