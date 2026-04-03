@@ -63,10 +63,17 @@ Big-name clubs (Poppy, Sound, Delilah, etc.) aren't showing up because the Disco
 - [x] Lower viewport reload sensitivity and preserve cached tiles during pan/zoom so map exploration feels instant with no visible loading state
 - [x] Expand max zoom-out distance substantially so the map can roam much farther without feeling artificially constrained
 
+### 10. Server/data foundation for viewport tile feed ✅
+- [x] Add Supabase migration for `external_event_viewport_tiles` with tile-key uniqueness, viewport metadata, TTLs, and service-role upsert RPC
+- [x] Add shared Swift models for slippy-map viewport tile keys, bounds, ranges, and tile bundle payloads
+- [x] Add `SupabaseEventViewportTileService` so the iOS app can request z/x/y viewport bundles from Supabase instead of only center/radius snapshot buckets
+- [x] Define deterministic Web Mercator tile math (`recommendedZoom`, viewport→tile range, tile→bounds) so the server and app can speak the same tile contract
+- [x] Keep the existing snapshot cache path available as a compatibility fallback while the tile-backed feed is rolled out
+
 ## What stays the same
 - No hardcoded venue names — everything is 100% scrape-driven (server-side)
 - All existing lighting, camera, and lookdev in the app
 - Ticketmaster, Eventbrite, RunSignup API calls still run on-device (fast structured JSON)
 - Existing cache, dedup, and merge logic
-- Supabase read path unchanged
+- Existing snapshot cache, dedup, and merge logic stay in place alongside the new viewport tile feed foundation
 - Fly.io server scraper unchanged (still does all the heavy scraping)

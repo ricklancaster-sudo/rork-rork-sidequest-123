@@ -28,7 +28,8 @@ The Fly.io worker is the **primary scraping engine**. It polls Supabase for refr
 4. **Enriches with Google Reviews** (HTML scraping, no API key needed)
 5. **Deduplicates and normalizes** events
 6. **Writes snapshot** to `external_event_snapshots` in Supabase
-7. **Records metrics** to `source_health` and `coverage_metrics`
+7. **Materializes viewport tiles** into `external_event_viewport_tiles` for z/x/y map exploration reads
+8. **Records metrics** to `source_health` and `coverage_metrics`
 
 ### Nightlife Scraping (Discotech + Clubbable)
 
@@ -129,6 +130,7 @@ curl -X POST https://sidequest-ingestion-worker.fly.dev/api/trigger-backfill \
 | Table | Purpose | Writer | Reader |
 |-------|---------|--------|--------|
 | `external_event_snapshots` | Pre-warmed event/venue snapshots per metro+intent | Fly.io worker | iOS app |
+| `external_event_viewport_tiles` | Precomputed z/x/y viewport tile bundles for map exploration | Fly.io worker | iOS app |
 | `ingestion_metros` | Which metros to scrape, with tier and refresh intervals | Admin | Fly.io worker |
 | `refresh_jobs` | Job queue with claiming, heartbeats, retries, backoff | Fly.io scheduler | Fly.io worker |
 | `refresh_runs` | Execution history for observability | Fly.io worker | Admin |
@@ -145,6 +147,7 @@ curl -X POST https://sidequest-ingestion-worker.fly.dev/api/trigger-backfill \
 - `reclaim_stale_jobs()` — Recover jobs from dead workers
 - `enqueue_scheduled_refreshes()` — Auto-enqueue based on metro intervals
 - `upsert_event_snapshot()` — Upsert event snapshots (used by iOS fallback too)
+- `upsert_external_event_viewport_tile()` — Upsert precomputed viewport tile bundles keyed by intent + z/x/y tile
 
 ---
 
@@ -169,6 +172,8 @@ curl -X POST https://sidequest-ingestion-worker.fly.dev/api/trigger-backfill \
                     │                      │
                     │  external_event_     │
                     │  snapshots           │
+                    │  external_event_     │
+                    │  viewport_tiles      │
                     │                      │
                     │  venue_review_cache  │
                     │  source_health       │
@@ -180,7 +185,7 @@ curl -X POST https://sidequest-ingestion-worker.fly.dev/api/trigger-backfill \
                     │      iOS App         │
                     │                      │
                     │  Supabase cache read │
-                    │  (instant nightlife) │
+                    │ (snapshots + tiles)  │
                     │                      │
                     │  Ticketmaster/etc    │
                     │  API calls (fast)    │
@@ -191,23 +196,26 @@ curl -X POST https://sidequest-ingestion-worker.fly.dev/api/trigger-backfill \
                     └──────────────────────┘
 ```
 
-### iOS Path (as of 2026-03-30 — NO device-side scraping)
+### iOS Path (as of 2026-04-03 — NO device-side scraping)
 1. Restore from local disk cache (instant if available from prior session)
-2. `SupabaseEventFeedCacheService` queries `external_event_snapshots` by lat/lng bucket + intent
-3. If a valid (non-expired) snapshot exists → instant display (nightlife + Ticketmaster + everything)
-4. Concurrently, `ExternalEventIngestionService` fetches Ticketmaster/Google Events/Eventbrite/RunSignup APIs (fast JSON, 2-3s)
-5. If Supabase cache is stale or missing, `FlyioScraperTriggerService` POSTs to Fly.io `/api/trigger-refresh` (fire-and-forget)
-6. **NO device-side HTML scraping** — no Discotech, no Clubbable, no Google Reviews, no venue website scraping, no Apple Maps enrichment
-7. All nightlife data comes exclusively from Supabase (populated by Fly.io server)
+2. `SupabaseEventViewportTileService` can query `external_event_viewport_tiles` by intent + z/x/y viewport range for map-camera exploration
+3. `SupabaseEventFeedCacheService` continues to query `external_event_snapshots` by lat/lng bucket + intent as the compatibility fallback path
+4. If a valid Supabase cache entry exists → instant display (nightlife + Ticketmaster + everything)
+5. Concurrently, `ExternalEventIngestionService` fetches Ticketmaster/Google Events/Eventbrite/RunSignup APIs (fast JSON, 2-3s)
+6. If Supabase cache is stale or missing, `FlyioScraperTriggerService` POSTs to Fly.io `/api/trigger-refresh` (fire-and-forget)
+7. **NO device-side HTML scraping** — no Discotech, no Clubbable, no Google Reviews, no venue website scraping, no Apple Maps enrichment
+8. All nightlife data comes exclusively from Supabase (populated by Fly.io server)
 
 ### What runs on-device
 - Ticketmaster, Eventbrite, RunSignup, Google Events **API calls** (structured JSON, fast)
-- Reading from Supabase cache
+- Reading from Supabase snapshot cache and viewport tile cache
+- Web Mercator viewport→tile math to request the correct z/x/y bundle window
 - Fire-and-forget trigger to Fly.io when cache is stale
 
 ### What ONLY runs server-side (Fly.io)
 - ALL HTML scraping: Discotech, Clubbable, HWood Rolodex, Google Reviews
 - Nightlife venue discovery and enrichment
+- Snapshot normalization plus viewport tile materialization for nationwide map reads
 - Scheduled refresh orchestration (cron-like metro polling)
 - Review poison detection and cross-validation
 - Coverage metrics and source health tracking
