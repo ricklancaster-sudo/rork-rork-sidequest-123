@@ -8,6 +8,43 @@ private struct MapWorldSnapshot {
     let diagnosticsSignature: String
 }
 
+private struct ViewportPOIRequest: Equatable {
+    let center: CLLocationCoordinate2D
+    let visibleRadius: Double
+
+    static func == (lhs: ViewportPOIRequest, rhs: ViewportPOIRequest) -> Bool {
+        abs(lhs.center.latitude - rhs.center.latitude) < 0.0001
+            && abs(lhs.center.longitude - rhs.center.longitude) < 0.0001
+            && abs(lhs.visibleRadius - rhs.visibleRadius) < 1
+    }
+}
+
+private struct POITileDescriptor: Hashable {
+    let category: MapQuestCategory
+    let center: CLLocationCoordinate2D
+    let searchRadius: Double
+    let bucketLatitude: Int
+    let bucketLongitude: Int
+
+    var cacheKey: String {
+        "\(category.rawValue)_\(bucketLatitude)_\(bucketLongitude)_\(Int(searchRadius.rounded()))"
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(category)
+        hasher.combine(bucketLatitude)
+        hasher.combine(bucketLongitude)
+        hasher.combine(Int(searchRadius.rounded()))
+    }
+
+    static func == (lhs: POITileDescriptor, rhs: POITileDescriptor) -> Bool {
+        lhs.category == rhs.category
+            && lhs.bucketLatitude == rhs.bucketLatitude
+            && lhs.bucketLongitude == rhs.bucketLongitude
+            && abs(lhs.searchRadius - rhs.searchRadius) < 1
+    }
+}
+
 struct MapExploreView: View {
     let appState: AppState
 
@@ -41,7 +78,9 @@ struct MapExploreView: View {
     @State private var currentVisibleRadius: Double = 2000
     @State private var mapCameraCenter: CLLocationCoordinate2D?
     @State private var groupedEventsSheet: [ExternalEvent]?
-
+    @State private var cachedPOITiles: [String: [MapPOI]] = [:]
+    @State private var pendingViewportPOILoadTask: Task<Void, Never>?
+    @State private var lastViewportPOIRequest: ViewportPOIRequest?
 
     private let fallbackCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 34.0900, longitude: -118.3617)
     private var previewCoordinate: CLLocationCoordinate2D? {
@@ -269,7 +308,7 @@ struct MapExploreView: View {
         let locationGroups = groupEventsByLocation(visibleEvents)
 
         var encounters: [ExploreEncounter] = []
-        for group in locationGroups.prefix(80) {
+        for group in locationGroups.prefix(250) {
             let primaryEvent = group[0]
             let coordinate = eventCoordinate(primaryEvent) ?? centerCoordinate
 
@@ -638,7 +677,7 @@ struct MapExploreView: View {
             if let initialCategory = baseRecommendedCategories.first {
                 selectedCategory = initialCategory
             }
-            await reloadNearbyQuests()
+            scheduleViewportDrivenPOILoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleMapWorldRefresh()
         }
         .task(id: mapWorldDependencyKey) {
@@ -702,6 +741,9 @@ struct MapExploreView: View {
         }
         .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now in
             eventCountdownNow = now
+        }
+        .onDisappear {
+            pendingViewportPOILoadTask?.cancel()
         }
         .onChange(of: externalEventDiagnosticsSignature) { _, signature in
             logExternalEventDiagnosticsIfNeeded(signature: signature)
@@ -1083,55 +1125,85 @@ struct MapExploreView: View {
     }
 
 
-    private static let initialFetchRadius: Double = 80_000
+    private static let minimumVisibleRadiusForPOIs: Double = 2_000
+    private static let maximumPOISearchRadius: Double = 35_000
+    private static let maximumVisiblePOIs: Int = 220
 
-    private func reloadNearbyQuests(near location: CLLocation? = nil) async {
-        let searchLocation: CLLocation? = {
+    private func reloadNearbyQuests(
+        near location: CLLocation? = nil,
+        visibleRadius: Double? = nil
+    ) async {
+        let searchLocation: CLLocation = {
             if usesPreviewLocation,
                let previewCoordinate {
                 return CLLocation(latitude: previewCoordinate.latitude, longitude: previewCoordinate.longitude)
             }
-            return location ?? poiService.userLocation
+            if let location {
+                return location
+            }
+            if let userLocation = poiService.userLocation {
+                return userLocation
+            }
+            return CLLocation(latitude: centerCoordinate.latitude, longitude: centerCoordinate.longitude)
         }()
-        let searchCoord = searchLocation?.coordinate
-        var aggregated: [MapPOI] = []
 
+        let effectiveVisibleRadius = max(visibleRadius ?? currentVisibleRadius, Self.minimumVisibleRadiusForPOIs)
+        let tileSearchRadius = min(max(effectiveVisibleRadius * 0.55, 4_000), Self.maximumPOISearchRadius)
         let categories = recommendedCategories
-        let fetchRadius = Self.initialFetchRadius
-        await withTaskGroup(of: [MapPOI].self) { group in
-            for category in categories {
-                let bucketSize: Int = hasExplicitCategoryFocus && category == selectedCategory ? 16 : 10
+        let descriptors = poiTileDescriptors(
+            around: searchLocation.coordinate,
+            visibleRadius: effectiveVisibleRadius,
+            searchRadius: tileSearchRadius,
+            categories: categories
+        )
+        let hasFocusedCategory = hasExplicitCategoryFocus
+        let focusedCategory = selectedCategory
+
+        if abs(poiService.searchRadiusMeters - tileSearchRadius) > 500 {
+            poiService.searchRadiusMeters = tileSearchRadius
+        }
+
+        let cachedImmediateResults = descriptors.flatMap { descriptor in
+            cachedPOITiles[descriptor.cacheKey] ?? []
+        }
+        applyLoadedPOIs(cachedImmediateResults, center: searchLocation.coordinate)
+
+        let missingDescriptors = descriptors.filter { cachedPOITiles[$0.cacheKey] == nil }
+        guard !missingDescriptors.isEmpty else {
+            hasCompletedInitialFetch = true
+            return
+        }
+
+        let searchCenter = searchLocation.coordinate
+        let fetchedTiles: [(String, [MapPOI])] = await withTaskGroup(of: (String, [MapPOI]).self, returning: [(String, [MapPOI])].self) { group in
+            for descriptor in missingDescriptors {
+                let bucketSize: Int = hasFocusedCategory && descriptor.category == focusedCategory ? 18 : 10
                 group.addTask {
-                    let loc: CLLocation? = searchCoord.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
-                    let results = await Self.searchPOIsLightweight(for: category, near: loc, radius: fetchRadius)
-                    return Array(results.prefix(bucketSize))
+                    let tileLocation = CLLocation(latitude: descriptor.center.latitude, longitude: descriptor.center.longitude)
+                    let results = await Self.searchPOIsLightweight(for: descriptor.category, near: tileLocation, radius: descriptor.searchRadius)
+                    return (descriptor.cacheKey, Array(results.prefix(bucketSize)))
                 }
             }
-            for await results in group {
-                aggregated.append(contentsOf: results)
+
+            var collected: [(String, [MapPOI])] = []
+            for await result in group {
+                collected.append(result)
             }
+            return collected
         }
 
-        let sortedAggregated: [MapPOI] = aggregated.sorted { lhs, rhs in
-            let lhsScore = poiPriorityScore(for: lhs)
-            let rhsScore = poiPriorityScore(for: rhs)
+        guard !Task.isCancelled else { return }
 
-            if lhsScore == rhsScore {
-                return (lhs.distance ?? .greatestFiniteMagnitude) < (rhs.distance ?? .greatestFiniteMagnitude)
-            }
-            return lhsScore > rhsScore
+        var updatedCache = cachedPOITiles
+        for (cacheKey, pois) in fetchedTiles {
+            updatedCache[cacheKey] = pois
         }
+        cachedPOITiles = updatedCache
 
-        var deduplicated: [MapPOI] = []
-        var seenKeys: Set<String> = []
-        for poi in sortedAggregated {
-            let key = mixedPOIDeduplicationKey(for: poi)
-            guard !seenKeys.contains(key) else { continue }
-            seenKeys.insert(key)
-            deduplicated.append(poi)
+        let mergedResults = descriptors.flatMap { descriptor in
+            updatedCache[descriptor.cacheKey] ?? []
         }
-
-        mixedPOIs = Array(deduplicated.prefix(60))
+        applyLoadedPOIs(mergedResults, center: searchCenter)
         hasCompletedInitialFetch = true
     }
 
@@ -1143,8 +1215,15 @@ struct MapExploreView: View {
         return "\(poi.name.lowercased())_\(latitudeBucket)_\(longitudeBucket)"
     }
 
-    private func poiPriorityScore(for poi: MapPOI) -> Int {
-        let distanceBonus = distancePriority(for: poi.distance)
+    private func poiPriorityScore(for poi: MapPOI, centerLocation: CLLocation? = nil) -> Int {
+        let resolvedDistance: Double? = {
+            if let explicitDistance = poi.distance {
+                return explicitDistance
+            }
+            guard let centerLocation else { return nil }
+            return centerLocation.distance(from: CLLocation(latitude: poi.coordinate.latitude, longitude: poi.coordinate.longitude))
+        }()
+        let distanceBonus = distancePriority(for: resolvedDistance)
         let unvisitedBonus = appState.hasVisitedPOI(poi) ? -20 : 16
         let focusedCategoryBonus = hasExplicitCategoryFocus && poi.category == selectedCategory ? 22 : 0
         return categoryAffinityScore(for: poi.category) + distanceBonus + unvisitedBonus + focusedCategoryBonus
@@ -1374,8 +1453,23 @@ struct MapExploreView: View {
     }
 
     private func handleRegionChanged(center: CLLocationCoordinate2D, visibleRadius: Double) {
+        let radiusDelta = abs(currentVisibleRadius - visibleRadius)
         currentVisibleRadius = visibleRadius
         mapCameraCenter = center
+
+        let lastCenter = lastViewportPOIRequest?.center
+        let movementDistance: CLLocationDistance = {
+            guard let lastCenter else { return .greatestFiniteMagnitude }
+            return CLLocation(latitude: lastCenter.latitude, longitude: lastCenter.longitude)
+                .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
+        }()
+        let movementThreshold = max(visibleRadius * 0.28, 1_200)
+        let shouldRefreshViewport = radiusDelta > max(currentVisibleRadius * 0.2, 1_500)
+            || movementDistance > movementThreshold
+            || mixedPOIs.isEmpty
+
+        guard shouldRefreshViewport else { return }
+        scheduleViewportDrivenPOILoad(center: center, visibleRadius: visibleRadius)
     }
 
     private func openInMaps(poi: MapPOI) {
@@ -1416,6 +1510,94 @@ struct MapExploreView: View {
         guard !isCancelledExternalEvent(event), !isEndedExternalEvent(event) else { return false }
         guard eventCoordinate(event) != nil else { return false }
         return true
+    }
+
+    private func scheduleViewportDrivenPOILoad(
+        center: CLLocationCoordinate2D,
+        visibleRadius: Double,
+        force: Bool = false
+    ) {
+        let nextRequest = ViewportPOIRequest(center: center, visibleRadius: visibleRadius)
+        if !force, nextRequest == lastViewportPOIRequest {
+            return
+        }
+        lastViewportPOIRequest = nextRequest
+        pendingViewportPOILoadTask?.cancel()
+        pendingViewportPOILoadTask = Task {
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            let location = CLLocation(latitude: center.latitude, longitude: center.longitude)
+            await reloadNearbyQuests(near: location, visibleRadius: visibleRadius)
+        }
+    }
+
+    private func poiTileDescriptors(
+        around center: CLLocationCoordinate2D,
+        visibleRadius: Double,
+        searchRadius: Double,
+        categories: [MapQuestCategory]
+    ) -> [POITileDescriptor] {
+        let anchorOffsets: [(Double, Double)] = {
+            if visibleRadius < 6_000 {
+                return [(0, 0)]
+            }
+            if visibleRadius < 18_000 {
+                let stride = visibleRadius * 0.7
+                return [(0, 0), (stride, 0), (-stride, 0), (0, stride), (0, -stride)]
+            }
+            let stride = min(visibleRadius * 0.8, 80_000)
+            return [(0, 0), (stride, 0), (-stride, 0), (0, stride), (0, -stride), (stride, stride), (stride, -stride), (-stride, stride), (-stride, -stride)]
+        }()
+
+        let bucketMeters = max(searchRadius * 0.9, 1_000)
+        let latitudeStep = bucketMeters / 111_320
+        let safeCosine = max(cos(center.latitude * .pi / 180), 0.2)
+        let longitudeStep = bucketMeters / (111_320 * safeCosine)
+
+        var seenKeys: Set<String> = []
+        var descriptors: [POITileDescriptor] = []
+
+        for category in categories {
+            for (northMeters, eastMeters) in anchorOffsets {
+                let anchor = offsetCoordinate(from: center, northMeters: northMeters, eastMeters: eastMeters)
+                let descriptor = POITileDescriptor(
+                    category: category,
+                    center: anchor,
+                    searchRadius: searchRadius,
+                    bucketLatitude: Int((anchor.latitude / latitudeStep).rounded()),
+                    bucketLongitude: Int((anchor.longitude / longitudeStep).rounded())
+                )
+                if seenKeys.insert(descriptor.cacheKey).inserted {
+                    descriptors.append(descriptor)
+                }
+            }
+        }
+
+        return descriptors
+    }
+
+    private func applyLoadedPOIs(_ pois: [MapPOI], center: CLLocationCoordinate2D) {
+        let centerLocation = CLLocation(latitude: center.latitude, longitude: center.longitude)
+        let sortedAggregated: [MapPOI] = pois.sorted { lhs, rhs in
+            let lhsScore = poiPriorityScore(for: lhs, centerLocation: centerLocation)
+            let rhsScore = poiPriorityScore(for: rhs, centerLocation: centerLocation)
+
+            if lhsScore == rhsScore {
+                return (lhs.distance ?? .greatestFiniteMagnitude) < (rhs.distance ?? .greatestFiniteMagnitude)
+            }
+            return lhsScore > rhsScore
+        }
+
+        var deduplicated: [MapPOI] = []
+        var seenKeys: Set<String> = []
+        for poi in sortedAggregated {
+            let key = mixedPOIDeduplicationKey(for: poi)
+            guard !seenKeys.contains(key) else { continue }
+            seenKeys.insert(key)
+            deduplicated.append(poi)
+        }
+
+        mixedPOIs = Array(deduplicated.prefix(Self.maximumVisiblePOIs))
     }
 
     private func isCancelledExternalEvent(_ event: ExternalEvent) -> Bool {
