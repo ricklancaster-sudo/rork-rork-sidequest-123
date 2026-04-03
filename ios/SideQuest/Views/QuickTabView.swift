@@ -83,6 +83,18 @@ struct QuickTabView: View {
     @State private var homePullHasTriggered: Bool = false
     @State private var isHomePullRefreshArmed: Bool = false
 
+    @State private var showDevPanel: Bool = false
+    @State private var devCamX: CGFloat = 0
+    @State private var devCamY: CGFloat = 0
+    @State private var devCamZ: CGFloat = 0
+    @State private var devBodyX: CGFloat = 8
+    @State private var devBodyY: CGFloat = 48
+    @State private var devScale: CGFloat = 0.92
+    @State private var devFrameW: CGFloat = 146
+    @State private var devFrameH: CGFloat = 260
+    @State private var devClipW: CGFloat = 146
+    @State private var devClipH: CGFloat = 154
+
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
@@ -120,6 +132,24 @@ struct QuickTabView: View {
             }
             .ignoresSafeArea(edges: .top)
             .toolbar(.hidden, for: .navigationBar)
+            .overlay(alignment: .bottom) {
+                if showDevPanel {
+                    characterDevPanel
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                Button {
+                    withAnimation(.spring(duration: 0.3)) { showDevPanel.toggle() }
+                } label: {
+                    Image(systemName: showDevPanel ? "xmark.circle.fill" : "slider.horizontal.3")
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .padding(.leading, 16)
+                .padding(.top, 58)
+            }
 
             .sheet(isPresented: $showStepsDetail) {
                 StepsDetailSheet(profile: appState.profile, stepCoinsAwardedToday: appState.stepCoinsAwardedToday)
@@ -585,12 +615,91 @@ struct QuickTabView: View {
         .allowsHitTesting(false)
     }
 
+    private var characterDevPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Character Dev Panel")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                Group {
+                    Text("CAMERA POSITION").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
+                    devSlider(label: "Cam X", value: $devCamX, range: -200...200)
+                    devSlider(label: "Cam Y", value: $devCamY, range: -200...200)
+                    devSlider(label: "Cam Z", value: $devCamZ, range: -200...200)
+                }
+
+                Divider().background(.white.opacity(0.2))
+
+                Group {
+                    Text("BODY POSITION & SCALE").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
+                    devSlider(label: "Body X", value: $devBodyX, range: -100...100)
+                    devSlider(label: "Body Y", value: $devBodyY, range: -100...200)
+                    devSlider(label: "Scale", value: $devScale, range: 0.3...2.0, step: 0.01)
+                }
+
+                Divider().background(.white.opacity(0.2))
+
+                Group {
+                    Text("RENDER FRAME (3D view)").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
+                    devSlider(label: "Frame W", value: $devFrameW, range: 50...400)
+                    devSlider(label: "Frame H", value: $devFrameH, range: 50...500)
+                }
+
+                Divider().background(.white.opacity(0.2))
+
+                Group {
+                    Text("CLIP VIEWPORT").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
+                    devSlider(label: "Clip W", value: $devClipW, range: 50...400)
+                    devSlider(label: "Clip H", value: $devClipH, range: 50...400)
+                }
+
+                Divider().background(.white.opacity(0.2))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CURRENT VALUES").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
+                    Text("cam: (\(f(devCamX)), \(f(devCamY)), \(f(devCamZ)))")
+                    Text("body: (\(f(devBodyX)), \(f(devBodyY)))  scale: \(f(devScale))")
+                    Text("frame: \(f(devFrameW))x\(f(devFrameH))  clip: \(f(devClipW))x\(f(devClipH))")
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.green)
+            }
+            .padding(16)
+        }
+        .frame(maxHeight: 380)
+        .background(.ultraThinMaterial)
+        .clipShape(.rect(cornerRadius: 16))
+        .padding(.horizontal, 8)
+        .padding(.bottom, 90)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private func devSlider(label: String, value: Binding<CGFloat>, range: ClosedRange<CGFloat>, step: CGFloat = 1) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.7))
+                .frame(width: 56, alignment: .leading)
+            Slider(value: value, in: range, step: step)
+                .tint(.blue)
+            Text(f(value.wrappedValue))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.white)
+                .frame(width: 50, alignment: .trailing)
+        }
+    }
+
+    private func f(_ v: CGFloat) -> String {
+        String(format: "%.1f", v)
+    }
+
     private var heroAndStatsSection: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .topTrailing) {
                 HStack(alignment: .center, spacing: 2) {
                     Color.clear
-                        .frame(width: 146, height: 154)
+                        .frame(width: devClipW, height: devClipH)
                         .overlay(alignment: .bottom) {
                             Character3DView(
                                 characterType: appState.profile.selectedCharacter,
@@ -603,10 +712,10 @@ struct QuickTabView: View {
                                 isActive: appState.selectedTab == 0,
                                 equipment: appState.characterEquipment
                             )
-                            .frame(width: 146, height: 260)
+                            .frame(width: devFrameW, height: devFrameH)
                             .allowsHitTesting(false)
-                            .scaleEffect(0.92, anchor: .bottom)
-                            .offset(x: 8, y: 78)
+                            .scaleEffect(devScale, anchor: .bottom)
+                            .offset(x: devBodyX, y: devBodyY)
                         }
 
                     VStack(alignment: .leading, spacing: 0) {
