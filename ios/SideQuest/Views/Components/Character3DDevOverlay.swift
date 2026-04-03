@@ -29,81 +29,122 @@ nonisolated struct Character3DDevConfig: Codable, Sendable, Equatable {
 struct Character3DDevOverlay: View {
     @Binding var config: Character3DDevConfig
     @Binding var isVisible: Bool
-    @State private var jsonText: String = ""
-    @State private var statusMessage: String = ""
+    @State private var copied: Bool = false
 
     var body: some View {
         if isVisible {
-            VStack(spacing: 0) {
-                HStack {
-                    Text("3D Dev")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.white)
-                    Spacer()
-                    Button {
-                        jsonText = config.jsonString()
-                        statusMessage = "Exported"
-                    } label: {
-                        Text("Export")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.green, in: Capsule())
+            ScrollView {
+                VStack(spacing: 6) {
+                    HStack {
+                        Text("3D Dev")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                        Spacer()
+                        Button {
+                            UIPasteboard.general.string = config.jsonString()
+                            copied = true
+                            Task {
+                                try? await Task.sleep(for: .seconds(1.5))
+                                copied = false
+                            }
+                        } label: {
+                            Text(copied ? "Copied!" : "Copy JSON")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(copied ? .green : .orange, in: Capsule())
+                        }
+                        Button {
+                            isVisible = false
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.white.opacity(0.7))
+                        }
                     }
-                    Button {
-                        applyJSON()
-                    } label: {
-                        Text("Apply")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.orange, in: Capsule())
-                    }
-                    Button {
-                        isVisible = false
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.white.opacity(0.7))
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
 
-                if !statusMessage.isEmpty {
-                    Text(statusMessage)
-                        .font(.caption2)
-                        .foregroundStyle(.yellow)
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 4)
-                }
+                    devRow("Cam Y", value: $config.camY, step: 0.5, range: -50...50)
 
-                TextEditor(text: $jsonText)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.green)
-                    .scrollContentBackground(.hidden)
-                    .frame(height: 200)
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 6)
+                    devRow("Mdl Y", value: $config.mdlY, step: 0.5, range: -50...50)
+
+                    sectionLabel("Target")
+                    devRow("Tgt X", value: $config.tgtX, step: 0.5, range: -50...50)
+                    devRow("Tgt Y", value: $config.tgtY, step: 0.5, range: -50...50)
+                    devRow("Tgt Z", value: $config.tgtZ, step: 0.5, range: -50...50)
+
+                    devRow("FOV", value: $config.fov, step: 1, range: 10...120)
+
+                    sectionLabel("Frame")
+                    devRow("Frame W", value: $config.frameW, step: 2, range: 50...500)
+                    devRow("Frame H", value: $config.frameH, step: 2, range: 50...500)
+
+                    sectionLabel("Clip")
+                    devRow("Clip W", value: $config.clipW, step: 2, range: 50...500)
+                    devRow("Clip H", value: $config.clipH, step: 2, range: 50...500)
+                }
+                .padding(.bottom, 10)
             }
-            .background(Color.black.opacity(0.88))
+            .frame(maxHeight: 340)
+            .background(Color.black.opacity(0.9))
             .clipShape(.rect(cornerRadius: 10))
             .padding(.horizontal, 12)
-            .onAppear {
-                jsonText = config.jsonString()
+            .onChange(of: config) { _, newVal in
+                sendJSCommands(newVal)
             }
         }
     }
 
-    private func applyJSON() {
-        guard let parsed = Character3DDevConfig.from(json: jsonText) else {
-            statusMessage = "Invalid JSON"
-            return
+    private func sectionLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 9, weight: .heavy, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.4))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.top, 2)
+    }
+
+    private func devRow(_ label: String, value: Binding<Double>, step: Double, range: ClosedRange<Double>) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.7))
+                .frame(width: 56, alignment: .leading)
+
+            Button {
+                value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Color.white.opacity(0.15), in: Circle())
+            }
+
+            Text(formatValue(value.wrappedValue))
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.green)
+                .frame(width: 52)
+
+            Button {
+                value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Color.white.opacity(0.15), in: Circle())
+            }
+
+            Slider(value: value, in: range, step: step)
+                .tint(.green)
         }
-        config = parsed
-        sendJSCommands(parsed)
-        statusMessage = "Applied"
+        .padding(.horizontal, 10)
+    }
+
+    private func formatValue(_ v: Double) -> String {
+        v == v.rounded() ? String(format: "%.0f", v) : String(format: "%.1f", v)
     }
 
     private func sendJSCommands(_ c: Character3DDevConfig) {
