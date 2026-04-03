@@ -83,21 +83,10 @@ struct QuickTabView: View {
     @State private var homePullHasTriggered: Bool = false
     @State private var isHomePullRefreshArmed: Bool = false
 
-    @State private var showDevPanel: Bool = false
-    @AppStorage("dev3DCamX") private var dev3DCamX: Double = 0
-    @AppStorage("dev3DCamY") private var dev3DCamY: Double = 0
-    @AppStorage("dev3DCamZ") private var dev3DCamZ: Double = 0
-    @AppStorage("dev3DModelX") private var dev3DModelX: Double = 0
-    @AppStorage("dev3DModelY") private var dev3DModelY: Double = 0
-    @AppStorage("dev3DModelZ") private var dev3DModelZ: Double = 0
-    @AppStorage("dev3DTargetX") private var dev3DTargetX: Double = 0
-    @AppStorage("dev3DTargetY") private var dev3DTargetY: Double = 0
-    @AppStorage("dev3DTargetZ") private var dev3DTargetZ: Double = 0
-    @AppStorage("dev3DFOV") private var dev3DFOV: Double = 0
-    @AppStorage("devFrameW") private var devFrameW: Double = 180
-    @AppStorage("devFrameH") private var devFrameH: Double = 300
-    @AppStorage("devClipW") private var devClipW: Double = 146
-    @AppStorage("devClipH") private var devClipH: Double = 154
+    private let devFrameW: CGFloat = 180
+    private let devFrameH: CGFloat = 300
+    private let devClipW: CGFloat = 146
+    private let devClipH: CGFloat = 154
 
     var body: some View {
         NavigationStack {
@@ -136,28 +125,6 @@ struct QuickTabView: View {
             }
             .ignoresSafeArea(edges: .top)
             .toolbar(.hidden, for: .navigationBar)
-            .overlay(alignment: .bottom) {
-                if showDevPanel {
-                    characterDevPanel
-                }
-            }
-            .overlay(alignment: .topLeading) {
-                Button {
-                    withAnimation(.spring(duration: 0.3)) { showDevPanel.toggle() }
-                } label: {
-                    Image(systemName: showDevPanel ? "xmark.circle.fill" : "slider.horizontal.3")
-                        .font(.title3)
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-                .padding(.leading, 16)
-                .padding(.top, 58)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .character3DSceneReady)) { _ in
-                sendAllDevValues()
-            }
-
             .sheet(isPresented: $showStepsDetail) {
                 StepsDetailSheet(profile: appState.profile, stepCoinsAwardedToday: appState.stepCoinsAwardedToday)
             }
@@ -620,159 +587,6 @@ struct QuickTabView: View {
         }
         .ignoresSafeArea(edges: .top)
         .allowsHitTesting(false)
-    }
-
-    private var characterDevPanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("3D Scene Controls")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-
-                Group {
-                    Text("CAMERA OFFSET (3D)").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
-                    dev3DSlider(label: "Cam X", value: $dev3DCamX, range: -10...10, step: 0.1) { sendDevCam() }
-                    dev3DSlider(label: "Cam Y", value: $dev3DCamY, range: -10...10, step: 0.1) { sendDevCam() }
-                    dev3DSlider(label: "Cam Z", value: $dev3DCamZ, range: -10...10, step: 0.1) { sendDevCam() }
-                }
-
-                Divider().background(.white.opacity(0.2))
-
-                Group {
-                    Text("MODEL OFFSET (3D)").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
-                    dev3DSlider(label: "Mdl X", value: $dev3DModelX, range: -10...10, step: 0.1) { sendDevModel() }
-                    dev3DSlider(label: "Mdl Y", value: $dev3DModelY, range: -10...10, step: 0.1) { sendDevModel() }
-                    dev3DSlider(label: "Mdl Z", value: $dev3DModelZ, range: -10...10, step: 0.1) { sendDevModel() }
-                }
-
-                Divider().background(.white.opacity(0.2))
-
-                Group {
-                    Text("TARGET OFFSET (3D)").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
-                    dev3DSlider(label: "Tgt X", value: $dev3DTargetX, range: -10...10, step: 0.1) { sendDevTarget() }
-                    dev3DSlider(label: "Tgt Y", value: $dev3DTargetY, range: -10...10, step: 0.1) { sendDevTarget() }
-                    dev3DSlider(label: "Tgt Z", value: $dev3DTargetZ, range: -10...10, step: 0.1) { sendDevTarget() }
-                }
-
-                Divider().background(.white.opacity(0.2))
-
-                Group {
-                    Text("FOV").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
-                    dev3DSlider(label: "FOV", value: $dev3DFOV, range: 10...80, step: 1) { sendDevFOV() }
-                }
-
-                Divider().background(.white.opacity(0.2))
-
-                Group {
-                    Text("SWIFTUI FRAME").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
-                    devSlider(label: "Frame W", value: $devFrameW, range: 50...500)
-                    devSlider(label: "Frame H", value: $devFrameH, range: 50...600)
-                    devSlider(label: "Clip W", value: $devClipW, range: 50...500)
-                    devSlider(label: "Clip H", value: $devClipH, range: 50...500)
-                }
-
-                Divider().background(.white.opacity(0.2))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("CURRENT VALUES").font(.caption2.weight(.bold)).foregroundStyle(.white.opacity(0.5))
-                    Text("camOff: (\(f3(dev3DCamX)), \(f3(dev3DCamY)), \(f3(dev3DCamZ)))")
-                    Text("mdlOff: (\(f3(dev3DModelX)), \(f3(dev3DModelY)), \(f3(dev3DModelZ)))")
-                    Text("tgtOff: (\(f3(dev3DTargetX)), \(f3(dev3DTargetY)), \(f3(dev3DTargetZ)))")
-                    Text("fov: \(f(dev3DFOV))  frame: \(f(devFrameW))x\(f(devFrameH))")
-                    Text("clip: \(f(devClipW))x\(f(devClipH))")
-                }
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.green)
-
-                Button("Reset All") {
-                    dev3DCamX = 0; dev3DCamY = 0; dev3DCamZ = 0
-                    dev3DModelX = 0; dev3DModelY = 0; dev3DModelZ = 0
-                    dev3DTargetX = 0; dev3DTargetY = 0; dev3DTargetZ = 0
-                    dev3DFOV = 0
-                    sendDevCam(); sendDevModel(); sendDevTarget(); sendDevFOV()
-                }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.red)
-            }
-            .padding(16)
-        }
-        .frame(maxHeight: 420)
-        .background(.ultraThinMaterial)
-        .clipShape(.rect(cornerRadius: 16))
-        .padding(.horizontal, 8)
-        .padding(.bottom, 90)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
-
-    private func sendDevJS(_ js: String) {
-        NotificationCenter.default.post(
-            name: .character3DDevCommand,
-            object: nil,
-            userInfo: ["js": js]
-        )
-    }
-
-    private func sendDevCam() {
-        sendDevJS("window._devCam && window._devCam(\(dev3DCamX), \(dev3DCamY), \(dev3DCamZ))")
-    }
-
-    private func sendDevModel() {
-        sendDevJS("window._devModel && window._devModel(\(dev3DModelX), \(dev3DModelY), \(dev3DModelZ))")
-    }
-
-    private func sendDevTarget() {
-        sendDevJS("window._devTarget && window._devTarget(\(dev3DTargetX), \(dev3DTargetY), \(dev3DTargetZ))")
-    }
-
-    private func sendDevFOV() {
-        guard dev3DFOV > 0 else { return }
-        sendDevJS("window._devFOV && window._devFOV(\(dev3DFOV))")
-    }
-
-    private func sendAllDevValues() {
-        sendDevCam()
-        sendDevModel()
-        sendDevTarget()
-        sendDevFOV()
-    }
-
-    private func dev3DSlider(label: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double = 0.01, onChange: @escaping () -> Void) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
-                .frame(width: 46, alignment: .leading)
-            Slider(value: value, in: range, step: step)
-                .tint(.cyan)
-                .onChange(of: value.wrappedValue) { _, _ in onChange() }
-            Text(f3(value.wrappedValue))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.white)
-                .frame(width: 50, alignment: .trailing)
-        }
-    }
-
-    private func devSlider(label: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double = 1) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
-                .frame(width: 56, alignment: .leading)
-            Slider(value: value, in: range, step: step)
-                .tint(.blue)
-            Text(f(value.wrappedValue))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.white)
-                .frame(width: 50, alignment: .trailing)
-        }
-    }
-
-    private func f(_ v: Double) -> String {
-        String(format: "%.1f", v)
-    }
-
-    private func f3(_ v: Double) -> String {
-        String(format: "%.2f", v)
     }
 
     private var heroAndStatsSection: some View {
