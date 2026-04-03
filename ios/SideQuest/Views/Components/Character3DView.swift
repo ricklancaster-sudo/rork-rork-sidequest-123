@@ -345,6 +345,13 @@ private struct CharacterWebView: UIViewRepresentable {
                 isReady = false
                 isPreviewReady.wrappedValue = false
                 loadError.wrappedValue = payload?["error"] as? String ?? "Unknown error"
+            case "devCaptured":
+                let capturedFov = payload?["fov"] as? Double ?? 32.0
+                NotificationCenter.default.post(
+                    name: .character3DDevCaptured,
+                    object: nil,
+                    userInfo: ["fov": capturedFov]
+                )
             case "slotChanged":
                 let slot = payload?["slot"] as? String ?? "unknown"
                 let equipped = payload?["equipped"] as? Bool ?? false

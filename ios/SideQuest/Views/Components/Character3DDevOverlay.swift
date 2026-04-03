@@ -6,7 +6,8 @@ nonisolated struct Character3DDevConfig: Codable, Sendable, Equatable {
     var tgtX: Double = 0
     var tgtY: Double = 0
     var tgtZ: Double = 0
-    var fov: Double = 50
+    var fov: Double = 32
+    var scale: Double = 1.0
     var frameW: Double = 180
     var frameH: Double = 300
     var clipW: Double = 146
@@ -75,6 +76,8 @@ struct Character3DDevOverlay: View {
                     devRow("Tgt Z", value: $config.tgtZ, step: 0.5, range: -50...50)
 
                     devRow("FOV", value: $config.fov, step: 1, range: 10...120)
+
+                    devRow("Scale", value: $config.scale, step: 0.05, range: 0.1...3.0)
 
                     sectionLabel("Frame")
                     devRow("Frame W", value: $config.frameW, step: 2, range: 50...500)
@@ -152,7 +155,8 @@ struct Character3DDevOverlay: View {
             "window._devCam && window._devCam(0, \(c.camY), 0)",
             "window._devModel && window._devModel(0, \(c.mdlY), 0)",
             "window._devTarget && window._devTarget(\(c.tgtX), \(c.tgtY), \(c.tgtZ))",
-            "window._devFOV && window._devFOV(\(c.fov))"
+            "window._devFOV && window._devFOV(\(c.fov))",
+            "window._devScale && window._devScale(\(c.scale))"
         ]
         for cmd in cmds {
             NotificationCenter.default.post(

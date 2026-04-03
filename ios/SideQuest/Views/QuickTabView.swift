@@ -393,6 +393,12 @@ struct QuickTabView: View {
                 appState.pendingFocusLaunchInstanceId = nil
                 focusBlockLaunch = FocusBlockLaunch(quest: instance.quest, instanceId: instanceId)
             }
+            .onReceive(NotificationCenter.default.publisher(for: .character3DDevCaptured)) { note in
+                guard let fov = note.userInfo?["fov"] as? Double else { return }
+                if devConfig.fov != fov {
+                    devConfig.fov = fov
+                }
+            }
         }
     }
 

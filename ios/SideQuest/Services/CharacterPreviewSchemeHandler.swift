@@ -503,6 +503,12 @@ window._devCapture = function() {
     if (model && !_devBaseModel) {
         _devBaseModel = {x: model.position.x, y: model.position.y, z: model.position.z};
     }
+    try {
+        window.webkit.messageHandlers.previewState.postMessage({
+            state: 'devCaptured',
+            fov: camera.fov
+        });
+    } catch(e) {}
 };
 
 window._devCam = function(dx, dy, dz) {
@@ -531,6 +537,12 @@ window._devTarget = function(dx, dy, dz) {
 window._devFOV = function(newFov) {
     camera.fov = newFov;
     camera.updateProjectionMatrix();
+};
+
+window._devScale = function(s) {
+    if (model) {
+        model.scale.set(s, s, s);
+    }
 };
 
 window._devGetState = function() {
