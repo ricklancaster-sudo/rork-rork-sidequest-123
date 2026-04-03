@@ -606,10 +606,10 @@ struct QuickTabView: View {
                             .frame(width: 146, height: 184)
                             .allowsHitTesting(false)
                             .scaleEffect(0.92, anchor: .bottom)
-                            .offset(x: 14, y: 40)
+                            .offset(x: 8, y: 48)
                             .mask(alignment: .top) {
                                 Rectangle()
-                                    .frame(width: 146, height: 176)
+                                    .frame(width: 146, height: 196)
                             }
                         }
 
@@ -1072,8 +1072,8 @@ struct QuickTabView: View {
                             Button {
                                 selectedQuest = quest
                             } label: {
-                                forYouQuestCard(quest)
-                                    .frame(width: 180)
+                                QuestCardView(quest: quest, showCompletionCount: false)
+                                    .frame(width: 220)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
