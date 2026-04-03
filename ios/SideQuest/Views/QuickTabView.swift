@@ -84,20 +84,20 @@ struct QuickTabView: View {
     @State private var isHomePullRefreshArmed: Bool = false
 
     @State private var showDevPanel: Bool = false
-    @State private var dev3DCamX: CGFloat = 0
-    @State private var dev3DCamY: CGFloat = 0
-    @State private var dev3DCamZ: CGFloat = 0
-    @State private var dev3DModelX: CGFloat = 0
-    @State private var dev3DModelY: CGFloat = 0
-    @State private var dev3DModelZ: CGFloat = 0
-    @State private var dev3DTargetX: CGFloat = 0
-    @State private var dev3DTargetY: CGFloat = 0
-    @State private var dev3DTargetZ: CGFloat = 0
-    @State private var dev3DFOV: CGFloat = 32
-    @State private var devFrameW: CGFloat = 180
-    @State private var devFrameH: CGFloat = 300
-    @State private var devClipW: CGFloat = 146
-    @State private var devClipH: CGFloat = 154
+    @AppStorage("dev3DCamX") private var dev3DCamX: Double = 0
+    @AppStorage("dev3DCamY") private var dev3DCamY: Double = 0
+    @AppStorage("dev3DCamZ") private var dev3DCamZ: Double = 0
+    @AppStorage("dev3DModelX") private var dev3DModelX: Double = 0
+    @AppStorage("dev3DModelY") private var dev3DModelY: Double = 0
+    @AppStorage("dev3DModelZ") private var dev3DModelZ: Double = 0
+    @AppStorage("dev3DTargetX") private var dev3DTargetX: Double = 0
+    @AppStorage("dev3DTargetY") private var dev3DTargetY: Double = 0
+    @AppStorage("dev3DTargetZ") private var dev3DTargetZ: Double = 0
+    @AppStorage("dev3DFOV") private var dev3DFOV: Double = 32
+    @AppStorage("devFrameW") private var devFrameW: Double = 180
+    @AppStorage("devFrameH") private var devFrameH: Double = 300
+    @AppStorage("devClipW") private var devClipW: Double = 146
+    @AppStorage("devClipH") private var devClipH: Double = 154
 
     var body: some View {
         NavigationStack {
@@ -725,7 +725,7 @@ struct QuickTabView: View {
         sendDevJS("window._devFOV && window._devFOV(\(dev3DFOV))")
     }
 
-    private func dev3DSlider(label: String, value: Binding<CGFloat>, range: ClosedRange<CGFloat>, step: CGFloat = 0.01, onChange: @escaping () -> Void) -> some View {
+    private func dev3DSlider(label: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double = 0.01, onChange: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .font(.caption)
@@ -741,7 +741,7 @@ struct QuickTabView: View {
         }
     }
 
-    private func devSlider(label: String, value: Binding<CGFloat>, range: ClosedRange<CGFloat>, step: CGFloat = 1) -> some View {
+    private func devSlider(label: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double = 1) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .font(.caption)
@@ -756,11 +756,11 @@ struct QuickTabView: View {
         }
     }
 
-    private func f(_ v: CGFloat) -> String {
+    private func f(_ v: Double) -> String {
         String(format: "%.1f", v)
     }
 
-    private func f3(_ v: CGFloat) -> String {
+    private func f3(_ v: Double) -> String {
         String(format: "%.2f", v)
     }
 
