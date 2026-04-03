@@ -617,7 +617,7 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
 
         let isCafe = encounter.poi.category == .cafe
         displayPriority = isHigh ? .required : (isCafe ? .defaultHigh : .defaultLow)
-        clusteringIdentifier = (encounter.kind.isClusterable && !isCafe) ? "rpg-node" : nil
+        clusteringIdentifier = nil
 
         animateStructure(highPriority: isHigh)
     }

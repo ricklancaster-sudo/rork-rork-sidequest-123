@@ -603,14 +603,10 @@ struct QuickTabView: View {
                                 isActive: appState.selectedTab == 0,
                                 equipment: appState.characterEquipment
                             )
-                            .frame(width: 146, height: 184)
+                            .frame(width: 146, height: 260)
                             .allowsHitTesting(false)
                             .scaleEffect(0.92, anchor: .bottom)
                             .offset(x: 8, y: 48)
-                            .mask(alignment: .top) {
-                                Rectangle()
-                                    .frame(width: 146, height: 196)
-                            }
                         }
 
                     VStack(alignment: .leading, spacing: 0) {
