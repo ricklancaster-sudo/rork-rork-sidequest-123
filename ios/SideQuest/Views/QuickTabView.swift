@@ -776,7 +776,7 @@ struct QuickTabView: View {
                                 characterType: appState.profile.selectedCharacter,
                                 allowsControl: false,
                                 autoRotate: false,
-                                framing: .upperBody,
+                                framing: .headshot,
                                 modelYawDegrees: appState.profile.selectedCharacter.homeHeroYawDegrees,
                                 sceneStyle: .homeHero,
                                 debugMode: .beauty,
