@@ -177,7 +177,7 @@ struct ProfileTabView: View {
                 equipment: appState.characterEquipment
             )
             .allowsHitTesting(false)
-            .padding(.top, 50)
+            .padding(.top, 90)
 
             if let equippedEffect = appState.profile.equippedEffect {
                 CharacterEffectView(effectName: equippedEffect, diameter: 200)
