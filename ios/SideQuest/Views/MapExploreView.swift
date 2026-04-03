@@ -39,6 +39,8 @@ struct MapExploreView: View {
     @State private var mapWorldGeneration: Int = 0
     @State private var isPreparingMapWorld: Bool = false
     @State private var selectedMapFilter: MapExploreFilter = .all
+    @State private var currentVisibleRadius: Double = 2000
+    @State private var groupedEventsSheet: [ExternalEvent]?
 
 
     private let fallbackCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 34.0900, longitude: -118.3617)
@@ -253,67 +255,118 @@ struct MapExploreView: View {
     }
 
     private var externalEventRadiusMeters: Double {
-        max(poiService.searchRadiusMeters * 1.8, 50_000)
+        max(currentVisibleRadius * 1.5, 50_000)
     }
 
     private func buildExternalEventEncounters(normalizedMapEvents: [ExternalEvent]) -> [ExploreEncounter] {
         let centerLocation = CLLocation(latitude: centerCoordinate.latitude, longitude: centerCoordinate.longitude)
 
-        return normalizedMapEvents
+        let visibleEvents = normalizedMapEvents
             .filter { shouldShowExternalEventOnMap($0, centerLocation: centerLocation) }
             .sorted { lhs, rhs in
                 mapEventPriority(lhs: lhs, rhs: rhs)
             }
-            .prefix(80)
-            .map { event in
-                let coordinate = eventCoordinate(event) ?? centerCoordinate
 
-                let rewardPolicy = ExternalEventPolicyService.policy(for: event)
-                let quest = event.sideQuestQuest(rewardPolicy: rewardPolicy)
-                let timing = mapTiming(for: event)
-                let detailBits = [event.venueName, timing.secondaryLabel]
+        let locationGroups = groupEventsByLocation(visibleEvents)
+
+        var encounters: [ExploreEncounter] = []
+        for group in locationGroups.prefix(80) {
+            let primaryEvent = group[0]
+            let coordinate = eventCoordinate(primaryEvent) ?? centerCoordinate
+
+            let rewardPolicy = ExternalEventPolicyService.policy(for: primaryEvent)
+            let quest = primaryEvent.sideQuestQuest(rewardPolicy: rewardPolicy)
+            let timing = mapTiming(for: primaryEvent)
+
+            let pinTitle: String
+            let pinSubtitle: String
+            let pinFlavor: String
+
+            if group.count > 1 {
+                let venueName = primaryEvent.venueName ?? primaryEvent.title
+                pinTitle = venueName
+                pinSubtitle = "\(group.count) events · \(timing.primaryLabel)"
+                pinFlavor = group.prefix(3).map(\.title).joined(separator: ", ")
+            } else {
+                pinTitle = primaryEvent.title
+                let detailBits = [primaryEvent.venueName, timing.secondaryLabel]
                     .compactMap { value -> String? in
                         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-                              !trimmed.isEmpty else {
-                            return nil
-                        }
+                              !trimmed.isEmpty else { return nil }
                         return trimmed
                     }
-                let mapPOI = MapPOI(
-                    id: "external_event_\(event.id)",
-                    name: event.title,
-                    coordinate: coordinate,
-                    category: event.mapFallbackCategory,
-                    address: eventMapAddress(event),
-                    distance: centerLocation.distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)),
-                    placeDescription: event.shortDescription ?? event.fullDescription,
-                    websiteURL: nil,
-                    phoneNumber: nil,
-                    specificType: event.venueName ?? event.sideQuestPlaceType.rawValue,
-                    neighborhood: event.neighborhood,
-                    locality: event.city,
-                    mapItemIdentifier: nil
-                )
-
-                return ExploreEncounter(
-                    id: "encounter_event_\(event.id)",
-                    poi: mapPOI,
-                    quest: quest,
-                    title: event.title,
-                    subtitle: [timing.primaryLabel, event.venueName].compactMap { $0 }.joined(separator: " • "),
-                    flavorText: detailBits.isEmpty ? "Live event nearby" : detailBits.joined(separator: " • "),
-                    kind: .limitedEvent,
-                    difficulty: quest.difficulty,
-                    xp: rewardPolicy.xp,
-                    gold: rewardPolicy.coins,
-                    estimatedMinutes: quest.effectivePresenceMinutes,
-                    journeyTitle: nil,
-                    districtName: event.neighborhood ?? event.city ?? "Live Event",
-                    externalEvent: event,
-                    mapPinAssetName: event.mapPinAssetName,
-                    countdownText: timing.primaryLabel
-                )
+                pinSubtitle = [timing.primaryLabel, primaryEvent.venueName].compactMap { $0 }.joined(separator: " • ")
+                pinFlavor = detailBits.isEmpty ? "Live event nearby" : detailBits.joined(separator: " • ")
             }
+
+            let mapPOI = MapPOI(
+                id: "external_event_\(primaryEvent.id)",
+                name: pinTitle,
+                coordinate: coordinate,
+                category: primaryEvent.mapFallbackCategory,
+                address: eventMapAddress(primaryEvent),
+                distance: centerLocation.distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)),
+                placeDescription: primaryEvent.shortDescription ?? primaryEvent.fullDescription,
+                websiteURL: nil,
+                phoneNumber: nil,
+                specificType: primaryEvent.venueName ?? primaryEvent.sideQuestPlaceType.rawValue,
+                neighborhood: primaryEvent.neighborhood,
+                locality: primaryEvent.city,
+                mapItemIdentifier: nil
+            )
+
+            let countdownLabel = group.count > 1 ? "\(group.count)" : timing.primaryLabel
+
+            encounters.append(ExploreEncounter(
+                id: "encounter_event_\(primaryEvent.id)",
+                poi: mapPOI,
+                quest: quest,
+                title: pinTitle,
+                subtitle: pinSubtitle,
+                flavorText: pinFlavor,
+                kind: .limitedEvent,
+                difficulty: quest.difficulty,
+                xp: rewardPolicy.xp,
+                gold: rewardPolicy.coins,
+                estimatedMinutes: quest.effectivePresenceMinutes,
+                journeyTitle: nil,
+                districtName: primaryEvent.neighborhood ?? primaryEvent.city ?? "Live Event",
+                externalEvent: primaryEvent,
+                groupedEvents: group.count > 1 ? group : [],
+                mapPinAssetName: primaryEvent.mapPinAssetName,
+                countdownText: countdownLabel
+            ))
+        }
+        return encounters
+    }
+
+    private func groupEventsByLocation(_ events: [ExternalEvent]) -> [[ExternalEvent]] {
+        var groups: [[ExternalEvent]] = []
+        var assigned: Set<String> = []
+
+        for event in events {
+            guard !assigned.contains(event.id) else { continue }
+            guard let coord = eventCoordinate(event) else { continue }
+
+            var group: [ExternalEvent] = [event]
+            assigned.insert(event.id)
+
+            for other in events where !assigned.contains(other.id) {
+                guard let otherCoord = eventCoordinate(other) else { continue }
+                let dist = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+                    .distance(from: CLLocation(latitude: otherCoord.latitude, longitude: otherCoord.longitude))
+                if dist < 200 {
+                    group.append(other)
+                    assigned.insert(other.id)
+                }
+            }
+
+            group.sort { lhs, rhs in
+                (lhs.startAtUTC ?? .distantFuture) < (rhs.startAtUTC ?? .distantFuture)
+            }
+            groups.append(group)
+        }
+        return groups
     }
 
     private var externalEventDiagnosticsSignature: String {
@@ -630,6 +683,15 @@ struct MapExploreView: View {
                 ExternalEventDetailView(event: event, appState: appState)
             }
         }
+        .sheet(item: Binding(
+            get: { groupedEventsSheet.map { GroupedEventsWrapper(events: $0) } },
+            set: { wrapper in groupedEventsSheet = wrapper?.events }
+        )) { wrapper in
+            NavigationStack {
+                GroupedEventsListView(events: wrapper.events, appState: appState)
+            }
+            .presentationDetents([.medium, .large])
+        }
         .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now in
             eventCountdownNow = now
         }
@@ -642,6 +704,16 @@ struct MapExploreView: View {
         }
         .sensoryFeedback(.selection, trigger: selectedEncounter?.id)
     }
+
+    private static let fitnessCategories: Set<MapQuestCategory> = [
+        .gym, .pool, .basketballCourt, .rockClimbingGym, .martialArts, .tennisCourt, .yogaStudio, .danceStudio
+    ]
+    private static let outdoorsCategories: Set<MapQuestCategory> = [
+        .park, .trail, .beach, .lake, .bikePath, .dogPark, .skatePark
+    ]
+    private static let cultureCategories: Set<MapQuestCategory> = [
+        .library, .bookstore, .museum, .artGallery, .communityCenter, .placeOfWorship, .volunteerCenter
+    ]
 
     private var filteredEncounterList: [ExploreEncounter] {
         guard selectedMapFilter != .all else { return encounterList }
@@ -666,12 +738,12 @@ struct MapExploreView: View {
                 return event.eventType == .socialCommunityEvent || event.eventType == .weekendActivity
             case .liveEvents:
                 return encounter.kind == .limitedEvent
-            case .warrior:
-                return encounter.externalEvent == nil && encounter.poi.category.questPath == .warrior
-            case .explorer:
-                return encounter.externalEvent == nil && encounter.poi.category.questPath == .explorer
-            case .mind:
-                return encounter.externalEvent == nil && encounter.poi.category.questPath == .mind
+            case .fitness:
+                return encounter.externalEvent == nil && Self.fitnessCategories.contains(encounter.poi.category)
+            case .outdoors:
+                return encounter.externalEvent == nil && Self.outdoorsCategories.contains(encounter.poi.category)
+            case .culture:
+                return encounter.externalEvent == nil && Self.cultureCategories.contains(encounter.poi.category)
             }
         }
     }
@@ -774,12 +846,12 @@ struct MapExploreView: View {
             return encounterList.filter { guard let t = $0.externalEvent?.eventType else { return false }; return t == .socialCommunityEvent || t == .weekendActivity }.count
         case .liveEvents:
             return encounterList.filter { $0.kind == .limitedEvent }.count
-        case .warrior:
-            return encounterList.filter { $0.externalEvent == nil && $0.poi.category.questPath == .warrior }.count
-        case .explorer:
-            return encounterList.filter { $0.externalEvent == nil && $0.poi.category.questPath == .explorer }.count
-        case .mind:
-            return encounterList.filter { $0.externalEvent == nil && $0.poi.category.questPath == .mind }.count
+        case .fitness:
+            return encounterList.filter { $0.externalEvent == nil && Self.fitnessCategories.contains($0.poi.category) }.count
+        case .outdoors:
+            return encounterList.filter { $0.externalEvent == nil && Self.outdoorsCategories.contains($0.poi.category) }.count
+        case .culture:
+            return encounterList.filter { $0.externalEvent == nil && Self.cultureCategories.contains($0.poi.category) }.count
         }
     }
 
@@ -1020,8 +1092,7 @@ struct MapExploreView: View {
         var aggregated: [MapPOI] = []
 
         let categories = recommendedCategories
-        let baseRadius = poiService.searchRadiusMeters
-        let fetchRadius = baseRadius * Self.prefetchMultiplier
+        let fetchRadius = max(currentVisibleRadius * Self.prefetchMultiplier, poiService.searchRadiusMeters * Self.prefetchMultiplier)
         await withTaskGroup(of: [MapPOI].self) { group in
             for category in categories {
                 let bucketSize: Int = hasExplicitCategoryFocus && category == selectedCategory ? 12 : 6
@@ -1166,6 +1237,10 @@ struct MapExploreView: View {
     }
 
     private func handlePrimaryAction(for encounter: ExploreEncounter) {
+        if !encounter.groupedEvents.isEmpty {
+            groupedEventsSheet = encounter.groupedEvents
+            return
+        }
         if let externalEvent = encounter.externalEvent {
             selectedExternalEvent = externalEvent
             return
@@ -1297,6 +1372,8 @@ struct MapExploreView: View {
     private func handleRegionChanged(center: CLLocationCoordinate2D, visibleRadius: Double) {
         guard hasLoadedInitialWorld else { return }
 
+        currentVisibleRadius = visibleRadius
+
         if let prefetchCenter, prefetchRadius > 0 {
             let distFromPrefetchCenter = CLLocation(latitude: prefetchCenter.latitude, longitude: prefetchCenter.longitude)
                 .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
@@ -1340,7 +1417,9 @@ struct MapExploreView: View {
     }
 
     private func presentEncounter(_ encounter: ExploreEncounter) {
-        if let externalEvent = encounter.externalEvent {
+        if !encounter.groupedEvents.isEmpty {
+            groupedEventsSheet = encounter.groupedEvents
+        } else if let externalEvent = encounter.externalEvent {
             selectedEncounter = nil
             selectedExternalEvent = externalEvent
         } else {

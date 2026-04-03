@@ -66,6 +66,7 @@ nonisolated struct ExploreEncounter: Identifiable, Sendable {
     let journeyTitle: String?
     let districtName: String
     let externalEvent: ExternalEvent?
+    let groupedEvents: [ExternalEvent]
     let mapPinAssetName: String?
     let countdownText: String?
 
@@ -84,6 +85,7 @@ nonisolated struct ExploreEncounter: Identifiable, Sendable {
         journeyTitle: String?,
         districtName: String,
         externalEvent: ExternalEvent? = nil,
+        groupedEvents: [ExternalEvent] = [],
         mapPinAssetName: String? = nil,
         countdownText: String? = nil
     ) {
@@ -101,6 +103,7 @@ nonisolated struct ExploreEncounter: Identifiable, Sendable {
         self.journeyTitle = journeyTitle
         self.districtName = districtName
         self.externalEvent = externalEvent
+        self.groupedEvents = groupedEvents
         self.mapPinAssetName = mapPinAssetName
         self.countdownText = countdownText
     }
@@ -152,9 +155,9 @@ nonisolated enum MapExploreFilter: String, CaseIterable, Identifiable, Sendable 
     case sports
     case races
     case community
-    case warrior
-    case explorer
-    case mind
+    case fitness
+    case outdoors
+    case culture
 
     var id: String { rawValue }
 
@@ -167,9 +170,9 @@ nonisolated enum MapExploreFilter: String, CaseIterable, Identifiable, Sendable 
         case .sports: "Sports"
         case .races: "Races"
         case .community: "Community"
-        case .warrior: "Warrior"
-        case .explorer: "Explorer"
-        case .mind: "Mind"
+        case .fitness: "Fitness"
+        case .outdoors: "Outdoors"
+        case .culture: "Culture"
         }
     }
 
@@ -182,9 +185,9 @@ nonisolated enum MapExploreFilter: String, CaseIterable, Identifiable, Sendable 
         case .sports: "sportscourt.fill"
         case .races: "figure.run"
         case .community: "person.3.fill"
-        case .warrior: "flame.fill"
-        case .explorer: "map.fill"
-        case .mind: "brain.head.profile.fill"
+        case .fitness: "dumbbell.fill"
+        case .outdoors: "leaf.fill"
+        case .culture: "building.columns.fill"
         }
     }
 }
