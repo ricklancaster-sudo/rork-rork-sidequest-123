@@ -26,6 +26,8 @@ struct MapExploreView: View {
     @State private var hasExplicitCategoryFocus: Bool = false
     @State private var regionReloadTask: Task<Void, Never>?
     @State private var lastRegionCenter: CLLocationCoordinate2D?
+    @State private var prefetchCenter: CLLocationCoordinate2D?
+    @State private var prefetchRadius: Double = 0
     @State private var eventCountdownNow: Date = Date()
     @State private var loggedExternalEventDiagnosticsSignature: String = ""
     @State private var preparedMapWorldSnapshot = MapWorldSnapshot(
@@ -911,7 +913,9 @@ struct MapExploreView: View {
     }
 
 
-    private func reloadNearbyQuests(near location: CLLocation? = nil) async {
+    private static let prefetchMultiplier: Double = 2.5
+
+    private func reloadNearbyQuests(near location: CLLocation? = nil, forcePrefetch: Bool = false) async {
         isRefreshingNearbyQuests = true
         defer { isRefreshingNearbyQuests = false }
 
@@ -926,13 +930,14 @@ struct MapExploreView: View {
         var aggregated: [MapPOI] = []
 
         let categories = recommendedCategories
-        let radius = poiService.searchRadiusMeters
+        let baseRadius = poiService.searchRadiusMeters
+        let fetchRadius = baseRadius * Self.prefetchMultiplier
         await withTaskGroup(of: [MapPOI].self) { group in
             for category in categories {
-                let bucketSize: Int = hasExplicitCategoryFocus && category == selectedCategory ? 8 : 4
+                let bucketSize: Int = hasExplicitCategoryFocus && category == selectedCategory ? 12 : 6
                 group.addTask {
                     let loc: CLLocation? = searchCoord.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
-                    let results = await Self.searchPOIsLightweight(for: category, near: loc, radius: radius)
+                    let results = await Self.searchPOIsLightweight(for: category, near: loc, radius: fetchRadius)
                     return Array(results.prefix(bucketSize))
                 }
             }
@@ -960,7 +965,9 @@ struct MapExploreView: View {
             deduplicated.append(poi)
         }
 
-        mixedPOIs = Array(deduplicated.prefix(18))
+        mixedPOIs = Array(deduplicated.prefix(24))
+        prefetchCenter = searchCoord ?? (usesPreviewLocation ? previewCoordinate : nil)
+        prefetchRadius = fetchRadius
     }
 
 
@@ -1199,15 +1206,22 @@ struct MapExploreView: View {
 
     private func handleRegionChanged(center: CLLocationCoordinate2D, visibleRadius: Double) {
         guard hasLoadedInitialWorld else { return }
-        if let last = lastRegionCenter {
+
+        if let prefetchCenter, prefetchRadius > 0 {
+            let distFromPrefetchCenter = CLLocation(latitude: prefetchCenter.latitude, longitude: prefetchCenter.longitude)
+                .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
+            let safeZone = prefetchRadius * 0.45
+            guard distFromPrefetchCenter > safeZone else { return }
+        } else if let last = lastRegionCenter {
             let moved = CLLocation(latitude: last.latitude, longitude: last.longitude)
                 .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
-            guard moved > max(visibleRadius * 0.25, 200) else { return }
+            guard moved > max(visibleRadius * 0.35, 300) else { return }
         }
+
         lastRegionCenter = center
         regionReloadTask?.cancel()
         regionReloadTask = Task {
-            try? await Task.sleep(for: .milliseconds(600))
+            try? await Task.sleep(for: .milliseconds(800))
             guard !Task.isCancelled else { return }
             let loc = CLLocation(latitude: center.latitude, longitude: center.longitude)
             await reloadNearbyQuests(near: loc)
