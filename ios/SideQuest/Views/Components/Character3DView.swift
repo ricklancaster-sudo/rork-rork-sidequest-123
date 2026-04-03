@@ -193,8 +193,23 @@ private struct CharacterWebView: UIViewRepresentable {
             self.slotDebugInfo = slotDebugInfo
         }
 
+        private var devObserver: NSObjectProtocol?
+
         func bind(_ webView: WKWebView) {
             self.webView = webView
+            devObserver = NotificationCenter.default.addObserver(
+                forName: .character3DDevCommand,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                guard let js = note.userInfo?["js"] as? String,
+                      let wv = self?.webView else { return }
+                wv.evaluateJavaScript(js)
+            }
+        }
+
+        deinit {
+            if let devObserver { NotificationCenter.default.removeObserver(devObserver) }
         }
 
         func setActive(_ active: Bool, in webView: WKWebView) {
@@ -322,6 +337,7 @@ private struct CharacterWebView: UIViewRepresentable {
                 if let notes = payload?["lookupNotes"] as? [String] {
                     lookupNotes.wrappedValue = notes
                 }
+                webView?.evaluateJavaScript("window._devCapture && window._devCapture()")
             case "init":
                 isReady = false
                 isPreviewReady.wrappedValue = false

@@ -490,6 +490,59 @@ window._resume = function() {
     tick();
 };
 
+var _devCamOff = {x:0, y:0, z:0};
+var _devModelOff = {x:0, y:0, z:0};
+var _devTargetOff = {x:0, y:0, z:0};
+var _devBaseCam = null;
+var _devBaseTarget = null;
+
+window._devCapture = function() {
+    _devBaseCam = {x: camera.position.x, y: camera.position.y, z: camera.position.z};
+    _devBaseTarget = {x: ctrl.target.x, y: ctrl.target.y, z: ctrl.target.z};
+};
+
+window._devCam = function(dx, dy, dz) {
+    _devCamOff = {x: dx, y: dy, z: dz};
+    if (_devBaseCam) {
+        camera.position.set(_devBaseCam.x + dx, _devBaseCam.y + dy, _devBaseCam.z + dz);
+        camera.updateProjectionMatrix();
+    }
+};
+
+window._devModel = function(dx, dy, dz) {
+    _devModelOff = {x: dx, y: dy, z: dz};
+    if (model) {
+        model.updateWorldMatrix(true, true);
+        var b = new THREE.Box3().setFromObject(model);
+        var c = b.getCenter(new THREE.Vector3());
+        model.position.x = -c.x + dx;
+        model.position.y = -b.min.y + dy;
+        model.position.z = -c.z + dz;
+    }
+};
+
+window._devTarget = function(dx, dy, dz) {
+    _devTargetOff = {x: dx, y: dy, z: dz};
+    if (_devBaseTarget) {
+        ctrl.target.set(_devBaseTarget.x + dx, _devBaseTarget.y + dy, _devBaseTarget.z + dz);
+        ctrl.update();
+    }
+};
+
+window._devFOV = function(newFov) {
+    camera.fov = newFov;
+    camera.updateProjectionMatrix();
+};
+
+window._devGetState = function() {
+    return JSON.stringify({
+        cam: {x: camera.position.x.toFixed(3), y: camera.position.y.toFixed(3), z: camera.position.z.toFixed(3)},
+        target: {x: ctrl.target.x.toFixed(3), y: ctrl.target.y.toFixed(3), z: ctrl.target.z.toFixed(3)},
+        fov: camera.fov,
+        modelY: model ? model.position.y.toFixed(3) : 'n/a'
+    });
+};
+
 resize();
 window.addEventListener('resize', resize);
 
