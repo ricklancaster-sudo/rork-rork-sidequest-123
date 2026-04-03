@@ -231,8 +231,8 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
         case .zoomOut:
             let updatedCamera = MKMapCamera(
                 lookingAtCenter: camera.centerCoordinate,
-                fromDistance: min(camera.centerCoordinateDistance * 1.28, 9000),
-                pitch: 55,
+                fromDistance: min(camera.centerCoordinateDistance * 1.4, 80_000),
+                pitch: max(55 - (camera.centerCoordinateDistance / 2000) * 5, 0),
                 heading: 0
             )
             mapView.setCamera(updatedCamera, animated: true)

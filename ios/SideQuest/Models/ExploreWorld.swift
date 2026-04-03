@@ -152,7 +152,9 @@ nonisolated enum MapExploreFilter: String, CaseIterable, Identifiable, Sendable 
     case sports
     case races
     case community
-    case quests
+    case warrior
+    case explorer
+    case mind
 
     var id: String { rawValue }
 
@@ -165,7 +167,9 @@ nonisolated enum MapExploreFilter: String, CaseIterable, Identifiable, Sendable 
         case .sports: "Sports"
         case .races: "Races"
         case .community: "Community"
-        case .quests: "Quests"
+        case .warrior: "Warrior"
+        case .explorer: "Explorer"
+        case .mind: "Mind"
         }
     }
 
@@ -178,7 +182,9 @@ nonisolated enum MapExploreFilter: String, CaseIterable, Identifiable, Sendable 
         case .sports: "sportscourt.fill"
         case .races: "figure.run"
         case .community: "person.3.fill"
-        case .quests: "map.fill"
+        case .warrior: "flame.fill"
+        case .explorer: "map.fill"
+        case .mind: "brain.head.profile.fill"
         }
     }
 }

@@ -666,8 +666,12 @@ struct MapExploreView: View {
                 return event.eventType == .socialCommunityEvent || event.eventType == .weekendActivity
             case .liveEvents:
                 return encounter.kind == .limitedEvent
-            case .quests:
-                return encounter.externalEvent == nil
+            case .warrior:
+                return encounter.externalEvent == nil && encounter.poi.category.questPath == .warrior
+            case .explorer:
+                return encounter.externalEvent == nil && encounter.poi.category.questPath == .explorer
+            case .mind:
+                return encounter.externalEvent == nil && encounter.poi.category.questPath == .mind
             }
         }
     }
@@ -770,8 +774,12 @@ struct MapExploreView: View {
             return encounterList.filter { guard let t = $0.externalEvent?.eventType else { return false }; return t == .socialCommunityEvent || t == .weekendActivity }.count
         case .liveEvents:
             return encounterList.filter { $0.kind == .limitedEvent }.count
-        case .quests:
-            return encounterList.filter { $0.externalEvent == nil }.count
+        case .warrior:
+            return encounterList.filter { $0.externalEvent == nil && $0.poi.category.questPath == .warrior }.count
+        case .explorer:
+            return encounterList.filter { $0.externalEvent == nil && $0.poi.category.questPath == .explorer }.count
+        case .mind:
+            return encounterList.filter { $0.externalEvent == nil && $0.poi.category.questPath == .mind }.count
         }
     }
 
@@ -1292,12 +1300,12 @@ struct MapExploreView: View {
         if let prefetchCenter, prefetchRadius > 0 {
             let distFromPrefetchCenter = CLLocation(latitude: prefetchCenter.latitude, longitude: prefetchCenter.longitude)
                 .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
-            let safeZone = prefetchRadius * 0.45
-            guard distFromPrefetchCenter > safeZone else { return }
+            let edgeDistance = distFromPrefetchCenter + visibleRadius
+            guard edgeDistance > prefetchRadius * 0.85 else { return }
         } else if let last = lastRegionCenter {
             let moved = CLLocation(latitude: last.latitude, longitude: last.longitude)
                 .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
-            guard moved > max(visibleRadius * 0.35, 300) else { return }
+            guard moved > max(visibleRadius * 0.5, 500) else { return }
         }
 
         lastRegionCenter = center
