@@ -38,6 +38,7 @@ struct MapExploreView: View {
     @State private var mapWorldSignature: String = ""
     @State private var mapWorldGeneration: Int = 0
     @State private var isPreparingMapWorld: Bool = false
+    @State private var selectedMapFilter: MapExploreFilter = .all
 
 
     private let fallbackCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 34.0900, longitude: -118.3617)
@@ -252,7 +253,7 @@ struct MapExploreView: View {
     }
 
     private var externalEventRadiusMeters: Double {
-        max(poiService.searchRadiusMeters * 1.8, 10_000)
+        max(poiService.searchRadiusMeters * 1.8, 50_000)
     }
 
     private func buildExternalEventEncounters(normalizedMapEvents: [ExternalEvent]) -> [ExploreEncounter] {
@@ -263,7 +264,7 @@ struct MapExploreView: View {
             .sorted { lhs, rhs in
                 mapEventPriority(lhs: lhs, rhs: rhs)
             }
-            .prefix(40)
+            .prefix(80)
             .map { event in
                 let coordinate = eventCoordinate(event) ?? centerCoordinate
 
@@ -509,9 +510,9 @@ struct MapExploreView: View {
             ExploreMapView(
                 centerCoordinate: centerCoordinate,
                 userCoordinate: usesPreviewLocation ? nil : poiService.userLocation?.coordinate,
-                encounters: encounterList,
-                districts: districtOverlays,
-                zones: zoneOverlays,
+                encounters: filteredEncounterList,
+                districts: [],
+                zones: [],
                 routes: [],
                 selectedEncounterID: selectedEncounter?.id,
                 command: mapCommand,
@@ -537,7 +538,10 @@ struct MapExploreView: View {
             }
         }
         .overlay(alignment: .top) {
-            topChrome
+            VStack(spacing: 0) {
+                topChrome
+                mapFilterChips
+            }
         }
         .overlay(alignment: .top) {
             if showCheckedInConfirmation {
@@ -639,46 +643,46 @@ struct MapExploreView: View {
         .sensoryFeedback(.selection, trigger: selectedEncounter?.id)
     }
 
+    private var filteredEncounterList: [ExploreEncounter] {
+        guard selectedMapFilter != .all else { return encounterList }
+        return encounterList.filter { encounter in
+            switch selectedMapFilter {
+            case .all:
+                return true
+            case .nightlife:
+                guard let event = encounter.externalEvent else { return false }
+                return event.eventType == .partyNightlife || event.recordKind == .venueNight
+            case .concerts:
+                guard let event = encounter.externalEvent else { return false }
+                return event.eventType == .concert
+            case .sports:
+                guard let event = encounter.externalEvent else { return false }
+                return event.eventType == .sportsEvent
+            case .races:
+                guard let event = encounter.externalEvent else { return false }
+                return [.groupRun, .race5k, .race10k, .raceHalfMarathon, .raceMarathon].contains(event.eventType)
+            case .community:
+                guard let event = encounter.externalEvent else { return false }
+                return event.eventType == .socialCommunityEvent || event.eventType == .weekendActivity
+            case .liveEvents:
+                return encounter.kind == .limitedEvent
+            case .quests:
+                return encounter.externalEvent == nil
+            }
+        }
+    }
+
     private var topChrome: some View {
         HStack(spacing: 10) {
             Text("Explore")
                 .font(.system(.title3, design: .default, weight: .bold))
                 .foregroundStyle(.white)
 
-            Text("\(encounterList.count) nearby")
+            Text("\(filteredEncounterList.count) nearby")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.7))
 
             Spacer()
-
-            Menu {
-                ForEach([1000.0, 2000.0, 5000.0, 10000.0], id: \.self) { radius in
-                    Button {
-                        poiService.searchRadiusMeters = radius
-                        Task {
-                            await reloadNearbyQuests()
-                        }
-                    } label: {
-                        if poiService.searchRadiusMeters == radius {
-                            Label(radiusButtonTitle(for: radius), systemImage: "checkmark")
-                        } else {
-                            Text(radiusButtonTitle(for: radius))
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "scope")
-                        .font(.caption.weight(.bold))
-                    Text(radiusLabel)
-                        .font(.caption.weight(.semibold))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(.white.opacity(0.12), in: Capsule())
-            }
-            .foregroundStyle(.white)
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -691,6 +695,84 @@ struct MapExploreView: View {
             .padding(.bottom, -20)
             .ignoresSafeArea(edges: .top)
         )
+    }
+
+    private var mapFilterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(MapExploreFilter.allCases) { filter in
+                    let isSelected = selectedMapFilter == filter
+                    let count = filterCount(for: filter)
+                    Button {
+                        withAnimation(.snappy(duration: 0.25)) {
+                            selectedMapFilter = filter
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if let symbol = filter.symbol {
+                                Image(systemName: symbol)
+                                    .font(.caption2.weight(.bold))
+                            }
+                            Text(filter.label)
+                                .font(.caption.weight(.semibold))
+                            if filter != .all, count > 0 {
+                                Text("(\(count))")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(isSelected ? .white.opacity(0.85) : .white.opacity(0.5))
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(filterChipBackground(isSelected: isSelected))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(isSelected ? .white : .white.opacity(0.8))
+                    .sensoryFeedback(.selection, trigger: isSelected)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+        }
+        .contentMargins(.horizontal, 0)
+    }
+
+    @ViewBuilder
+    private func filterChipBackground(isSelected: Bool) -> some View {
+        if #available(iOS 26.0, *) {
+            if isSelected {
+                Color.clear.glassEffect(.regular.tint(.blue).interactive(), in: .capsule)
+            } else {
+                Color.clear.glassEffect(.regular, in: .capsule)
+            }
+        } else {
+            if isSelected {
+                Capsule().fill(.blue.opacity(0.55))
+            } else {
+                Capsule().fill(.white.opacity(0.12))
+            }
+        }
+    }
+
+    private func filterCount(for filter: MapExploreFilter) -> Int {
+        switch filter {
+        case .all:
+            return encounterList.count
+        case .nightlife:
+            return encounterList.filter { $0.externalEvent?.eventType == .partyNightlife || $0.externalEvent?.recordKind == .venueNight }.count
+        case .concerts:
+            return encounterList.filter { $0.externalEvent?.eventType == .concert }.count
+        case .sports:
+            return encounterList.filter { $0.externalEvent?.eventType == .sportsEvent }.count
+        case .races:
+            return encounterList.filter { guard let t = $0.externalEvent?.eventType else { return false }; return [.groupRun, .race5k, .race10k, .raceHalfMarathon, .raceMarathon].contains(t) }.count
+        case .community:
+            return encounterList.filter { guard let t = $0.externalEvent?.eventType else { return false }; return t == .socialCommunityEvent || t == .weekendActivity }.count
+        case .liveEvents:
+            return encounterList.filter { $0.kind == .limitedEvent }.count
+        case .quests:
+            return encounterList.filter { $0.externalEvent == nil }.count
+        }
     }
 
     private var floatingControls: some View {

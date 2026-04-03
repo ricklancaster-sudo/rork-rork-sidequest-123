@@ -144,6 +144,45 @@ nonisolated struct ExploreRoute: Identifiable, Sendable {
     let path: QuestPath
 }
 
+nonisolated enum MapExploreFilter: String, CaseIterable, Identifiable, Sendable {
+    case all
+    case liveEvents
+    case nightlife
+    case concerts
+    case sports
+    case races
+    case community
+    case quests
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: "All"
+        case .liveEvents: "Live"
+        case .nightlife: "Nightlife"
+        case .concerts: "Concerts"
+        case .sports: "Sports"
+        case .races: "Races"
+        case .community: "Community"
+        case .quests: "Quests"
+        }
+    }
+
+    var symbol: String? {
+        switch self {
+        case .all: nil
+        case .liveEvents: "bolt.fill"
+        case .nightlife: "moon.stars.fill"
+        case .concerts: "music.mic"
+        case .sports: "sportscourt.fill"
+        case .races: "figure.run"
+        case .community: "person.3.fill"
+        case .quests: "map.fill"
+        }
+    }
+}
+
 nonisolated enum ExploreMapCommandAction: String, Sendable {
     case recenter
     case zoomIn
