@@ -210,7 +210,16 @@ struct MapExploreView: View {
 
     private var activeMapEventFeed: [ExternalEvent] {
         guard isViewportEventTileFeedEnabled else { return fallbackMapEvents }
-        return hasResolvedViewportEventFeed ? viewportExternalEvents : fallbackMapEvents
+        if hasResolvedViewportEventFeed {
+            let fallback = fallbackMapEvents
+            if viewportExternalEvents.isEmpty {
+                return fallback
+            }
+            let viewportIDs = Set(viewportExternalEvents.map(\.id))
+            let extraFallback = fallback.filter { !viewportIDs.contains($0.id) }
+            return viewportExternalEvents + extraFallback
+        }
+        return fallbackMapEvents
     }
 
     private var viewportEventTileIntents: [ExternalDiscoveryIntent] {
@@ -1771,7 +1780,7 @@ struct MapExploreView: View {
         }
     }
 
-    private static let wideEventZoom: Int = 10
+    private static let wideEventZoom: Int = 11
 
     private func makeWideZoomEventRequest(for viewport: ExploreMapViewport) -> ViewportEventRequest? {
         let bounds = ExternalEventViewportBounds(
@@ -1782,7 +1791,7 @@ struct MapExploreView: View {
         )
 
         let detailedZoom = SupabaseEventViewportTileService.shared.recommendedZoom(for: bounds)
-        guard detailedZoom > Self.wideEventZoom else { return nil }
+        guard detailedZoom != Self.wideEventZoom else { return nil }
 
         let range = SupabaseEventViewportTileService.shared.tileRange(for: bounds, zoom: Self.wideEventZoom)
         let paddedRange = expandedViewportTileRange(range, padding: 1)
@@ -1944,7 +1953,7 @@ struct MapExploreView: View {
             && coordinate.longitude <= east + longitudePadding
     }
 
-    private static let widePOIZoom: Int = 10
+    private static let widePOIZoom: Int = 11
 
     private func scheduleViewportDrivenSupabasePOILoad(
         center: CLLocationCoordinate2D,
@@ -2190,7 +2199,7 @@ struct MapExploreView: View {
         visibleRadius: Double,
         force: Bool = false
     ) {
-        guard visibleRadius <= 50_000 else { return }
+        guard visibleRadius <= 200_000 else { return }
         let viewport = currentViewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
         let nextRequest = ViewportPOIRequest(
             center: center,
