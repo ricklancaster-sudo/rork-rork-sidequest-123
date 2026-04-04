@@ -740,6 +740,9 @@ struct MapExploreView: View {
             scheduleViewportDrivenPOILoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleViewportDrivenEventLoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleMapWorldRefresh()
+            Task.detached(priority: .utility) {
+                await CronSweepService.shared.sweepIfNeeded()
+            }
             Task {
                 try? await Task.sleep(for: .seconds(2))
                 isInitialPOILoadProtected = false
@@ -1593,10 +1596,12 @@ struct MapExploreView: View {
 
         let viewport = currentViewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
         let request = makeViewportEventRequest(for: viewport)
-        if !force, request.signature == lastViewportEventRequestSignature {
+        let wideRequest = makeWideZoomEventRequest(for: viewport)
+        let combinedSignature = request.signature + "|" + (wideRequest?.signature ?? "")
+        if !force, combinedSignature == lastViewportEventRequestSignature {
             return
         }
-        lastViewportEventRequestSignature = request.signature
+        lastViewportEventRequestSignature = combinedSignature
 
         let cachedEvents = aggregatedAllCachedViewportEvents()
         if !cachedEvents.isEmpty || hasResolvedViewportEventFeed {
@@ -1606,7 +1611,14 @@ struct MapExploreView: View {
         let missingIntents = request.intents.filter { intent in
             requestTileCacheKeys(for: request, intent: intent).contains { viewportEventTileCache[$0] == nil }
         }
-        guard !missingIntents.isEmpty else {
+        let wideMissingIntents: [ExternalDiscoveryIntent] = {
+            guard let wideRequest else { return [] }
+            return wideRequest.intents.filter { intent in
+                requestTileCacheKeys(for: wideRequest, intent: intent).contains { viewportEventTileCache[$0] == nil }
+            }
+        }()
+
+        guard !missingIntents.isEmpty || !wideMissingIntents.isEmpty else {
             viewportExternalEvents = cachedEvents
             hasResolvedViewportEventFeed = true
             return
@@ -1629,6 +1641,18 @@ struct MapExploreView: View {
                             countryCode: request.countryCode,
                             state: nil
                         )
+                    }
+                }
+                if let wideRequest {
+                    for intent in wideMissingIntents {
+                        group.addTask {
+                            await service.loadBundle(
+                                intent: intent,
+                                range: wideRequest.range,
+                                countryCode: wideRequest.countryCode,
+                                state: nil
+                            )
+                        }
                     }
                 }
 
@@ -1661,6 +1685,41 @@ struct MapExploreView: View {
             viewportExternalEvents = aggregatedAllCachedViewportEvents()
             hasResolvedViewportEventFeed = true
         }
+    }
+
+    private static let wideEventZoom: Int = 10
+
+    private func makeWideZoomEventRequest(for viewport: ExploreMapViewport) -> ViewportEventRequest? {
+        let bounds = ExternalEventViewportBounds(
+            northLatitude: max(viewport.northEast.latitude, viewport.northWest.latitude),
+            southLatitude: min(viewport.southEast.latitude, viewport.southWest.latitude),
+            eastLongitude: max(viewport.northEast.longitude, viewport.southEast.longitude),
+            westLongitude: min(viewport.northWest.longitude, viewport.southWest.longitude)
+        )
+
+        let detailedZoom = SupabaseEventViewportTileService.shared.recommendedZoom(for: bounds)
+        guard detailedZoom > Self.wideEventZoom else { return nil }
+
+        let range = SupabaseEventViewportTileService.shared.tileRange(for: bounds, zoom: Self.wideEventZoom)
+        let paddedRange = expandedViewportTileRange(range, padding: 1)
+        let resolvedRange = paddedRange.tileCount <= 196 ? paddedRange : range
+        let intents = viewportEventTileIntents
+        let countryCode = viewportEventCountryCode
+        let signature = [
+            countryCode,
+            intents.map(\.rawValue).joined(separator: ","),
+            "wz\(resolvedRange.z)",
+            "x\(resolvedRange.minX)-\(resolvedRange.maxX)",
+            "y\(resolvedRange.minY)-\(resolvedRange.maxY)"
+        ].joined(separator: "|")
+
+        return ViewportEventRequest(
+            bounds: bounds,
+            range: resolvedRange,
+            intents: intents,
+            countryCode: countryCode,
+            signature: signature
+        )
     }
 
     private func aggregatedAllCachedViewportEvents() -> [ExternalEvent] {
@@ -1801,6 +1860,8 @@ struct MapExploreView: View {
             && coordinate.longitude <= east + longitudePadding
     }
 
+    private static let widePOIZoom: Int = 10
+
     private func scheduleViewportDrivenSupabasePOILoad(
         center: CLLocationCoordinate2D,
         visibleRadius: Double,
@@ -1827,12 +1888,20 @@ struct MapExploreView: View {
         let resolvedRange = paddedRange.tileCount <= 256 ? paddedRange : range
         let countryCode = viewportEventCountryCode
 
+        let wideRange: ExternalEventViewportTileRange? = {
+            guard zoom > Self.widePOIZoom else { return nil }
+            let wr = SupabasePOIViewportTileService.tileRange(for: bounds, zoom: Self.widePOIZoom)
+            let paddedWR = expandedViewportTileRange(wr, padding: 1)
+            return paddedWR.tileCount <= 256 ? paddedWR : wr
+        }()
+
         let signature = [
             "poi",
             countryCode,
             "z\(resolvedRange.z)",
             "x\(resolvedRange.minX)-\(resolvedRange.maxX)",
-            "y\(resolvedRange.minY)-\(resolvedRange.maxY)"
+            "y\(resolvedRange.minY)-\(resolvedRange.maxY)",
+            wideRange.map { "wz\($0.z)_x\($0.minX)-\($0.maxX)_y\($0.minY)-\($0.maxY)" } ?? ""
         ].joined(separator: "|")
 
         if !force, signature == lastSupabasePOITileSignature { return }
@@ -1845,7 +1914,11 @@ struct MapExploreView: View {
 
         let hasMissing = supabasePOITileCacheKeys(for: resolvedRange, countryCode: countryCode)
             .contains { supabasePOITileCache[$0] == nil }
-        guard hasMissing else {
+        let hasWideMissing = wideRange.map {
+            supabasePOITileCacheKeys(for: $0, countryCode: countryCode)
+                .contains { supabasePOITileCache[$0] == nil }
+        } ?? false
+        guard hasMissing || hasWideMissing else {
             mergeSupabasePOIs(cachedPOIs)
             hasResolvedSupabasePOIFeed = true
             return
@@ -1855,28 +1928,39 @@ struct MapExploreView: View {
         pendingSupabasePOILoadTask = Task {
             guard !Task.isCancelled else { return }
             let service = SupabasePOIViewportTileService.shared
-            let bundle = await service.loadTiles(range: resolvedRange, countryCode: countryCode)
+
+            let detailedBundle = hasMissing ? await service.loadTiles(range: resolvedRange, countryCode: countryCode) : nil
+            let wideBundle: POIViewportTileBundle? = {
+                guard hasWideMissing, let wr = wideRange else { return nil }
+                return nil
+            }()
+            let wideBundleResult: POIViewportTileBundle? = hasWideMissing && wideRange != nil
+                ? await service.loadTiles(range: wideRange!, countryCode: countryCode)
+                : wideBundle
             guard !Task.isCancelled else { return }
 
-            if let bundle {
-                var updatedCache = supabasePOITileCache
+            var updatedCache = supabasePOITileCache
+
+            for bundle in [detailedBundle, wideBundleResult].compactMap({ $0 }) {
                 for tile in bundle.tiles {
                     let cacheKey = supabasePOITileCacheKeyFor(tile.tile)
                     let mapPOIs = tile.pois.compactMap(convertTilePOIToMapPOI)
                     updatedCache[cacheKey] = mapPOIs
                 }
 
-                for x in resolvedRange.minX ... resolvedRange.maxX {
-                    for y in resolvedRange.minY ... resolvedRange.maxY {
-                        let key = supabasePOITileCacheKeyFor(z: resolvedRange.z, x: x, y: y, countryCode: countryCode)
+                let r = bundle.range
+                guard r.minX <= r.maxX, r.minY <= r.maxY else { continue }
+                for x in r.minX ... r.maxX {
+                    for y in r.minY ... r.maxY {
+                        let key = supabasePOITileCacheKeyFor(z: r.z, x: x, y: y, countryCode: countryCode)
                         if updatedCache[key] == nil {
                             updatedCache[key] = []
                         }
                     }
                 }
-
-                supabasePOITileCache = updatedCache
             }
+
+            supabasePOITileCache = updatedCache
 
             let allPOIs = aggregatedAllSupabasePOIs()
             mergeSupabasePOIs(allPOIs)
