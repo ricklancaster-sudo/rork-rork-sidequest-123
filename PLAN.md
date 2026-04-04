@@ -70,6 +70,13 @@ Big-name clubs (Poppy, Sound, Delilah, etc.) aren't showing up because the Disco
 - [x] Define deterministic Web Mercator tile math (`recommendedZoom`, viewport→tile range, tile→bounds) so the server and app can speak the same tile contract
 - [x] Keep the existing snapshot cache path available as a compatibility fallback while the tile-backed feed is rolled out
 
+### 11. iOS event map now consumes the viewport tile feed ✅
+- [x] Refactor `MapExploreView` to hydrate map events from `SupabaseEventViewportTileService` viewport tile bundles instead of relying only on center/radius event snapshots
+- [x] Preserve the existing event pins while viewport tile requests are inflight so pan/zoom exploration has no spinner-based loading UX
+- [x] Filter event visibility against the current camera viewport and keep same-address grouped event consolidation intact on the map
+- [x] Update `ExploreMapView` annotation syncing so map pins are diffed and reused instead of being fully torn down on every viewport refresh
+- [x] Keep the older snapshot-driven event feeds as a compatibility fallback when the viewport tile feed is unavailable
+
 ## What stays the same
 - No hardcoded venue names — everything is 100% scrape-driven (server-side)
 - All existing lighting, camera, and lookdev in the app

@@ -88,6 +88,8 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
     private var currentZoomScale: CGFloat = 1.0
     private var roadBearingCache: [String: Double] = [:]
     private var hasApplied3DCafe: Bool = false
+    private var encounterAnnotationsByID: [String: ExploreEncounterAnnotation] = [:]
+    private var districtAnnotationsByID: [String: ExploreDistrictLabelAnnotation] = [:]
     weak var mapViewRef: MKMapView?
 
     init(parent: ExploreMapView) {
@@ -112,7 +114,7 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
 
     func syncMapContent(on mapView: MKMapView) {
         let encounterSignature = parent.encounters.map { encounter in
-            "\(encounter.id)_\(encounter.kind.rawValue)_\(encounter.coordinate.latitude)_\(encounter.coordinate.longitude)_\(encounter.countdownText ?? "")_\(encounter.mapPinAssetName ?? "")"
+            "\(encounter.id)_\(encounter.kind.rawValue)_\(encounter.poi.category.rawValue)_\(encounter.coordinate.latitude)_\(encounter.coordinate.longitude)_\(encounter.title)_\(encounter.subtitle)_\(encounter.groupedEvents.count)_\(encounter.countdownText ?? "")_\(encounter.mapPinAssetName ?? "")"
         }.joined(separator: "|")
         let districtSignature = parent.districts.map { district in
             let firstCoordinate = district.coordinates.first
@@ -139,24 +141,13 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
         lastZoneSignature = zoneSignature
         lastRouteSignature = routeSignature
 
-        let existingCustomAnnotations = mapView.annotations.filter {
-            !($0 is MKUserLocation)
-        }
-        mapView.removeAnnotations(existingCustomAnnotations)
+        syncEncounterAnnotations(on: mapView)
+        syncDistrictAnnotations(on: mapView)
 
         zoneStyles.removeAll(keepingCapacity: true)
         districtStyles.removeAll(keepingCapacity: true)
         routeStyles.removeAll(keepingCapacity: true)
         mapView.removeOverlays(mapView.overlays)
-
-        let encounterAnnotations: [ExploreEncounterAnnotation] = parent.encounters.map { encounter in
-            ExploreEncounterAnnotation(encounter: encounter)
-        }
-        let districtAnnotations: [ExploreDistrictLabelAnnotation] = parent.districts.map { district in
-            ExploreDistrictLabelAnnotation(district: district)
-        }
-        mapView.addAnnotations(encounterAnnotations)
-        mapView.addAnnotations(districtAnnotations)
 
         hasApplied3DCafe = false
         if enablesCafe3DAnnotations {
@@ -185,6 +176,80 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
             let circle = MKCircle(center: zone.centerCoordinate, radius: zone.radius)
             zoneStyles[ObjectIdentifier(circle)] = zone
             mapView.addOverlay(circle, level: .aboveRoads)
+        }
+    }
+
+    private func syncEncounterAnnotations(on mapView: MKMapView) {
+        let incomingEncounters = Dictionary(uniqueKeysWithValues: parent.encounters.map { ($0.id, $0) })
+        let staleIDs = Set(encounterAnnotationsByID.keys).subtracting(incomingEncounters.keys)
+        let staleAnnotations = staleIDs.compactMap { encounterAnnotationsByID[$0] }
+        if !staleAnnotations.isEmpty {
+            mapView.removeAnnotations(staleAnnotations)
+            for staleID in staleIDs {
+                encounterAnnotationsByID.removeValue(forKey: staleID)
+            }
+        }
+
+        var annotationsToAdd: [ExploreEncounterAnnotation] = []
+        for encounter in parent.encounters {
+            if let existingAnnotation = encounterAnnotationsByID[encounter.id] {
+                existingAnnotation.encounter = encounter
+                if existingAnnotation.coordinate.latitude != encounter.coordinate.latitude
+                    || existingAnnotation.coordinate.longitude != encounter.coordinate.longitude {
+                    existingAnnotation.coordinate = encounter.coordinate
+                }
+                if let view = mapView.view(for: existingAnnotation) as? ExploreEncounterAnnotationView {
+                    view.configure(with: encounter)
+                    if enablesCafe3DAnnotations,
+                       encounter.poi.category == .cafe,
+                       CafeBuildingRenderer.shared.isReady {
+                        let bearing = roadBearingForPOI(encounter.poi)
+                        view.applyCafe3DImage(bearing: bearing, zoomScale: currentZoomScale)
+                    }
+                }
+            } else {
+                let annotation = ExploreEncounterAnnotation(encounter: encounter)
+                encounterAnnotationsByID[encounter.id] = annotation
+                annotationsToAdd.append(annotation)
+            }
+        }
+
+        if !annotationsToAdd.isEmpty {
+            mapView.addAnnotations(annotationsToAdd)
+        }
+    }
+
+    private func syncDistrictAnnotations(on mapView: MKMapView) {
+        let incomingDistricts = Dictionary(uniqueKeysWithValues: parent.districts.map { ($0.id, $0) })
+        let staleIDs = Set(districtAnnotationsByID.keys).subtracting(incomingDistricts.keys)
+        let staleAnnotations = staleIDs.compactMap { districtAnnotationsByID[$0] }
+        if !staleAnnotations.isEmpty {
+            mapView.removeAnnotations(staleAnnotations)
+            for staleID in staleIDs {
+                districtAnnotationsByID.removeValue(forKey: staleID)
+            }
+        }
+
+        var annotationsToAdd: [ExploreDistrictLabelAnnotation] = []
+        for district in parent.districts {
+            if let existingAnnotation = districtAnnotationsByID[district.id] {
+                existingAnnotation.district = district
+                if existingAnnotation.coordinate.latitude != district.labelCoordinate.latitude
+                    || existingAnnotation.coordinate.longitude != district.labelCoordinate.longitude {
+                    existingAnnotation.coordinate = district.labelCoordinate
+                }
+                if let view = mapView.view(for: existingAnnotation) as? ExploreDistrictLabelAnnotationView {
+                    view.configure(with: district)
+                }
+            } else {
+                let annotation = ExploreDistrictLabelAnnotation(district: district)
+                districtAnnotationsByID[district.id] = annotation
+                annotationsToAdd.append(annotation)
+            }
+        }
+
+        if !annotationsToAdd.isEmpty {
+            mapView.addAnnotations(annotationsToAdd)
         }
     }
 
@@ -471,7 +536,7 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
 }
 
 nonisolated final class ExploreEncounterAnnotation: NSObject, MKAnnotation {
-    let encounter: ExploreEncounter
+    var encounter: ExploreEncounter
     @objc dynamic var coordinate: CLLocationCoordinate2D
     var title: String? { encounter.title }
     var subtitle: String? { encounter.subtitle }
@@ -483,7 +548,7 @@ nonisolated final class ExploreEncounterAnnotation: NSObject, MKAnnotation {
 }
 
 nonisolated final class ExploreDistrictLabelAnnotation: NSObject, MKAnnotation {
-    let district: ExploreDistrict
+    var district: ExploreDistrict
     @objc dynamic var coordinate: CLLocationCoordinate2D
     var title: String? { district.name }
 

@@ -27,6 +27,14 @@ private struct ViewportPOIRequest: Equatable {
     }
 }
 
+private struct ViewportEventRequest: Equatable {
+    let bounds: ExternalEventViewportBounds
+    let range: ExternalEventViewportTileRange
+    let intents: [ExternalDiscoveryIntent]
+    let countryCode: String
+    let signature: String
+}
+
 private struct POITileDescriptor: Hashable {
     let category: MapQuestCategory
     let center: CLLocationCoordinate2D
@@ -90,6 +98,11 @@ struct MapExploreView: View {
     @State private var cachedPOITiles: [String: [MapPOI]] = [:]
     @State private var pendingViewportPOILoadTask: Task<Void, Never>?
     @State private var lastViewportPOIRequest: ViewportPOIRequest?
+    @State private var viewportEventTileCache: [String: [ExternalEventViewportTileSnapshot]] = [:]
+    @State private var viewportExternalEvents: [ExternalEvent] = []
+    @State private var pendingViewportEventLoadTask: Task<Void, Never>?
+    @State private var lastViewportEventRequestSignature: String = ""
+    @State private var hasResolvedViewportEventFeed: Bool = false
 
     private let fallbackCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 34.0900, longitude: -118.3617)
     private var previewCoordinate: CLLocationCoordinate2D? {
@@ -167,6 +180,30 @@ struct MapExploreView: View {
 
     private var encounterList: [ExploreEncounter] {
         preparedMapWorldSnapshot.encounters
+    }
+
+    private var isViewportEventTileFeedEnabled: Bool {
+        SupabaseEventViewportTileService.shared.isConfigured
+    }
+
+    private var fallbackMapEvents: [ExternalEvent] {
+        appState.externalEventFeed + appState.eventsTabExternalEventFeed + appState.exclusiveExternalEventFeed
+    }
+
+    private var activeMapEventFeed: [ExternalEvent] {
+        guard isViewportEventTileFeedEnabled else { return fallbackMapEvents }
+        return hasResolvedViewportEventFeed ? viewportExternalEvents : fallbackMapEvents
+    }
+
+    private var viewportEventTileIntents: [ExternalDiscoveryIntent] {
+        ExternalDiscoveryIntent.allCases
+    }
+
+    private var viewportEventCountryCode: String {
+        let resolved = appState.externalEventSearchLocation?.countryCode
+            ?? appState.externalLocationDiscoverySnapshot?.searchLocation.countryCode
+            ?? "US"
+        return resolved.uppercased()
     }
 
     private func buildEncounterList(normalizedMapEvents: [ExternalEvent]) -> [ExploreEncounter] {
@@ -280,7 +317,7 @@ struct MapExploreView: View {
     }
 
     private func buildNormalizedMapEvents() -> [ExternalEvent] {
-        let merged = appState.externalEventFeed + appState.eventsTabExternalEventFeed + appState.exclusiveExternalEventFeed
+        let merged = activeMapEventFeed
         let ranked = merged.sorted(by: mapDuplicatePreference(lhs:rhs:))
         var seenIDs = Set<String>()
         var deduped: [ExternalEvent] = []
@@ -548,7 +585,7 @@ struct MapExploreView: View {
             .map(\.id)
             .sorted()
             .joined(separator: ",")
-        let eventKey = (appState.externalEventFeed + appState.eventsTabExternalEventFeed + appState.exclusiveExternalEventFeed)
+        let eventKey = activeMapEventFeed
             .map { event in
                 let start = event.startAtUTC?.timeIntervalSince1970 ?? -1
                 return "\(event.id):\(start):\(event.latitude ?? 0):\(event.longitude ?? 0)"
@@ -638,10 +675,6 @@ struct MapExploreView: View {
                     .allowsHitTesting(false)
             }
 
-            if !hasCompletedInitialFetch && encounterList.isEmpty {
-                loadingOrb
-            }
-
             if !poiService.locationAuthorized {
                 locationPermissionOverlay
             }
@@ -687,6 +720,7 @@ struct MapExploreView: View {
                 selectedCategory = initialCategory
             }
             scheduleViewportDrivenPOILoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
+            scheduleViewportDrivenEventLoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleMapWorldRefresh()
         }
         .task(id: mapWorldDependencyKey) {
@@ -753,6 +787,7 @@ struct MapExploreView: View {
         }
         .onDisappear {
             pendingViewportPOILoadTask?.cancel()
+            pendingViewportEventLoadTask?.cancel()
         }
         .onChange(of: externalEventDiagnosticsSignature) { _, signature in
             logExternalEventDiagnosticsIfNeeded(signature: signature)
@@ -1469,6 +1504,7 @@ struct MapExploreView: View {
         currentVisibleRadius = viewport.visibleRadius
         mapCameraCenter = viewport.center
         currentViewport = viewport
+        scheduleViewportDrivenEventLoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
 
         let lastCenter = lastViewportPOIRequest?.center
         let movementDistance: CLLocationDistance = {
@@ -1519,10 +1555,220 @@ struct MapExploreView: View {
         }
     }
 
+    private func scheduleViewportDrivenEventLoad(
+        center: CLLocationCoordinate2D,
+        visibleRadius: Double,
+        force: Bool = false
+    ) {
+        guard isViewportEventTileFeedEnabled else { return }
+
+        let viewport = currentViewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
+        let request = makeViewportEventRequest(for: viewport)
+        if !force, request.signature == lastViewportEventRequestSignature {
+            return
+        }
+        lastViewportEventRequestSignature = request.signature
+
+        let cachedEvents = aggregatedViewportEvents(for: request, using: viewportEventTileCache)
+        if !cachedEvents.isEmpty || hasResolvedViewportEventFeed {
+            viewportExternalEvents = cachedEvents
+        }
+
+        let missingIntents = request.intents.filter { intent in
+            requestTileCacheKeys(for: request, intent: intent).contains { viewportEventTileCache[$0] == nil }
+        }
+        guard !missingIntents.isEmpty else {
+            viewportExternalEvents = cachedEvents
+            hasResolvedViewportEventFeed = true
+            return
+        }
+
+        pendingViewportEventLoadTask?.cancel()
+        pendingViewportEventLoadTask = Task {
+            try? await Task.sleep(for: .milliseconds(140))
+            guard !Task.isCancelled else { return }
+
+            let service = SupabaseEventViewportTileService.shared
+            let loadedBundles = await withTaskGroup(
+                of: ExternalEventViewportTileBundle?.self,
+                returning: [ExternalEventViewportTileBundle].self
+            ) { group in
+                for intent in missingIntents {
+                    group.addTask {
+                        await service.loadBundle(
+                            intent: intent,
+                            range: request.range,
+                            countryCode: request.countryCode,
+                            state: nil
+                        )
+                    }
+                }
+
+                var bundles: [ExternalEventViewportTileBundle] = []
+                for await bundle in group {
+                    if let bundle {
+                        bundles.append(bundle)
+                    }
+                }
+                return bundles
+            }
+
+            guard !Task.isCancelled, !loadedBundles.isEmpty else { return }
+
+            await MainActor.run {
+                guard request.signature == lastViewportEventRequestSignature else { return }
+
+                var updatedCache = viewportEventTileCache
+                for bundle in loadedBundles {
+                    for tile in bundle.tiles {
+                        let cacheKey = viewportTileCacheKey(for: tile.tile)
+                        var cachedSnapshots = updatedCache[cacheKey] ?? []
+                        if let existingIndex = cachedSnapshots.firstIndex(where: { $0.id == tile.id }) {
+                            cachedSnapshots[existingIndex] = tile
+                        } else {
+                            cachedSnapshots.append(tile)
+                        }
+                        updatedCache[cacheKey] = cachedSnapshots
+                    }
+                }
+
+                viewportEventTileCache = updatedCache
+                viewportExternalEvents = aggregatedViewportEvents(for: request, using: updatedCache)
+                hasResolvedViewportEventFeed = true
+            }
+        }
+    }
+
+    private func makeViewportEventRequest(for viewport: ExploreMapViewport) -> ViewportEventRequest {
+        let bounds = ExternalEventViewportBounds(
+            northLatitude: max(viewport.northEast.latitude, viewport.northWest.latitude),
+            southLatitude: min(viewport.southEast.latitude, viewport.southWest.latitude),
+            eastLongitude: max(viewport.northEast.longitude, viewport.southEast.longitude),
+            westLongitude: min(viewport.northWest.longitude, viewport.southWest.longitude)
+        )
+
+        var zoom = SupabaseEventViewportTileService.shared.recommendedZoom(for: bounds)
+        var range = SupabaseEventViewportTileService.shared.tileRange(for: bounds, zoom: zoom)
+        while range.tileCount > 196, zoom > 0 {
+            zoom -= 1
+            range = SupabaseEventViewportTileService.shared.tileRange(for: bounds, zoom: zoom)
+        }
+
+        let paddedRange = expandedViewportTileRange(range, padding: 1)
+        let resolvedRange = paddedRange.tileCount <= 196 ? paddedRange : range
+        let intents = viewportEventTileIntents
+        let signature = [
+            viewportEventCountryCode,
+            intents.map(\.rawValue).joined(separator: ","),
+            "z\(resolvedRange.z)",
+            "x\(resolvedRange.minX)-\(resolvedRange.maxX)",
+            "y\(resolvedRange.minY)-\(resolvedRange.maxY)"
+        ].joined(separator: "|")
+
+        return ViewportEventRequest(
+            bounds: bounds,
+            range: resolvedRange,
+            intents: intents,
+            countryCode: viewportEventCountryCode,
+            signature: signature
+        )
+    }
+
+    private func expandedViewportTileRange(
+        _ range: ExternalEventViewportTileRange,
+        padding: Int
+    ) -> ExternalEventViewportTileRange {
+        ExternalEventViewportTileRange(
+            z: range.z,
+            minX: max(range.minX - padding, 0),
+            maxX: range.maxX + padding,
+            minY: max(range.minY - padding, 0),
+            maxY: range.maxY + padding
+        )
+    }
+
+    private func requestTileCacheKeys(
+        for request: ViewportEventRequest,
+        intent: ExternalDiscoveryIntent
+    ) -> [String] {
+        var keys: [String] = []
+        for x in request.range.minX ... request.range.maxX {
+            for y in request.range.minY ... request.range.maxY {
+                keys.append(
+                    viewportTileCacheKey(
+                        intent: intent,
+                        countryCode: request.countryCode,
+                        z: request.range.z,
+                        x: x,
+                        y: y
+                    )
+                )
+            }
+        }
+        return keys
+    }
+
+    private func viewportTileCacheKey(for tile: ExternalEventViewportTileKey) -> String {
+        viewportTileCacheKey(
+            intent: tile.intent,
+            countryCode: tile.countryCode,
+            z: tile.z,
+            x: tile.x,
+            y: tile.y
+        )
+    }
+
+    private func viewportTileCacheKey(
+        intent: ExternalDiscoveryIntent,
+        countryCode: String,
+        z: Int,
+        x: Int,
+        y: Int
+    ) -> String {
+        [
+            intent.rawValue,
+            countryCode.uppercased(),
+            String(z),
+            String(x),
+            String(y)
+        ].joined(separator: "::")
+    }
+
+    private func aggregatedViewportEvents(
+        for request: ViewportEventRequest,
+        using cache: [String: [ExternalEventViewportTileSnapshot]]
+    ) -> [ExternalEvent] {
+        request.intents
+            .flatMap { intent in
+                requestTileCacheKeys(for: request, intent: intent).flatMap { cache[$0] ?? [] }
+            }
+            .flatMap(\.mergedEvents)
+    }
+
     private func shouldShowExternalEventOnMap(_ event: ExternalEvent, centerLocation: CLLocation) -> Bool {
         guard !isCancelledExternalEvent(event), !isEndedExternalEvent(event) else { return false }
-        guard eventCoordinate(event) != nil else { return false }
+        guard let coordinate = eventCoordinate(event) else { return false }
+        if let viewport = currentViewport {
+            return coordinateIsInsideExpandedViewport(coordinate, viewport: viewport)
+        }
         return true
+    }
+
+    private func coordinateIsInsideExpandedViewport(
+        _ coordinate: CLLocationCoordinate2D,
+        viewport: ExploreMapViewport
+    ) -> Bool {
+        let north = max(viewport.northEast.latitude, viewport.northWest.latitude)
+        let south = min(viewport.southEast.latitude, viewport.southWest.latitude)
+        let east = max(viewport.northEast.longitude, viewport.southEast.longitude)
+        let west = min(viewport.northWest.longitude, viewport.southWest.longitude)
+        let latitudePadding = max((north - south) * 0.18, 0.02)
+        let longitudePadding = max((east - west) * 0.18, 0.02)
+
+        return coordinate.latitude >= south - latitudePadding
+            && coordinate.latitude <= north + latitudePadding
+            && coordinate.longitude >= west - longitudePadding
+            && coordinate.longitude <= east + longitudePadding
     }
 
     private func scheduleViewportDrivenPOILoad(
