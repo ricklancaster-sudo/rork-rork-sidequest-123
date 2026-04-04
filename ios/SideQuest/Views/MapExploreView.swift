@@ -103,6 +103,8 @@ struct MapExploreView: View {
     @State private var pendingViewportEventLoadTask: Task<Void, Never>?
     @State private var lastViewportEventRequestSignature: String = ""
     @State private var hasResolvedViewportEventFeed: Bool = false
+    @State private var backgroundPOILoadTasks: [String: Task<Void, Never>] = [:]
+    @State private var allCachedPOIs: [MapPOI] = []
 
     private let fallbackCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 34.0900, longitude: -118.3617)
     private var previewCoordinate: CLLocationCoordinate2D? {
@@ -1209,10 +1211,10 @@ struct MapExploreView: View {
             poiService.searchRadiusMeters = tileSearchRadius
         }
 
-        let cachedImmediateResults = descriptors.flatMap { descriptor in
-            cachedPOITiles[descriptor.cacheKey] ?? []
+        let allCached = cachedPOITiles.values.flatMap { $0 }
+        if !allCached.isEmpty {
+            applyLoadedPOIs(Array(allCached), center: searchLocation.coordinate)
         }
-        applyLoadedPOIs(cachedImmediateResults, center: searchLocation.coordinate)
 
         let missingDescriptors = descriptors.filter { cachedPOITiles[$0.cacheKey] == nil }
         guard !missingDescriptors.isEmpty else {
@@ -1221,36 +1223,25 @@ struct MapExploreView: View {
         }
 
         let searchCenter = searchLocation.coordinate
-        let fetchedTiles: [(String, [MapPOI])] = await withTaskGroup(of: (String, [MapPOI]).self, returning: [(String, [MapPOI])].self) { group in
-            for descriptor in missingDescriptors {
-                let bucketSize: Int = hasFocusedCategory && descriptor.category == focusedCategory ? 18 : 10
-                group.addTask {
-                    let tileLocation = CLLocation(latitude: descriptor.center.latitude, longitude: descriptor.center.longitude)
-                    let results = await Self.searchPOIsLightweight(for: descriptor.category, near: tileLocation, radius: descriptor.searchRadius)
-                    return (descriptor.cacheKey, Array(results.prefix(bucketSize)))
-                }
+        for descriptor in missingDescriptors {
+            let key = descriptor.cacheKey
+            guard backgroundPOILoadTasks[key] == nil else { continue }
+            let bucketSize: Int = hasFocusedCategory && descriptor.category == focusedCategory ? 18 : 10
+            let descriptorCenter = descriptor.center
+            let descriptorCategory = descriptor.category
+            let descriptorRadius = descriptor.searchRadius
+            backgroundPOILoadTasks[key] = Task {
+                let tileLocation = CLLocation(latitude: descriptorCenter.latitude, longitude: descriptorCenter.longitude)
+                let results = await Self.searchPOIsLightweight(for: descriptorCategory, near: tileLocation, radius: descriptorRadius)
+                let trimmed = Array(results.prefix(bucketSize))
+                cachedPOITiles[key] = trimmed
+                backgroundPOILoadTasks.removeValue(forKey: key)
+                let merged = Array(cachedPOITiles.values.flatMap { $0 })
+                allCachedPOIs = merged
+                applyLoadedPOIs(merged, center: searchCenter)
+                hasCompletedInitialFetch = true
             }
-
-            var collected: [(String, [MapPOI])] = []
-            for await result in group {
-                collected.append(result)
-            }
-            return collected
         }
-
-        guard !Task.isCancelled else { return }
-
-        var updatedCache = cachedPOITiles
-        for (cacheKey, pois) in fetchedTiles {
-            updatedCache[cacheKey] = pois
-        }
-        cachedPOITiles = updatedCache
-
-        let mergedResults = descriptors.flatMap { descriptor in
-            updatedCache[descriptor.cacheKey] ?? []
-        }
-        applyLoadedPOIs(mergedResults, center: searchCenter)
-        hasCompletedInitialFetch = true
     }
 
 
@@ -1499,26 +1490,17 @@ struct MapExploreView: View {
     }
 
     private func handleRegionChanged(_ viewport: ExploreMapViewport) {
-        let previousRadius = currentVisibleRadius
-        let radiusDelta = abs(previousRadius - viewport.visibleRadius)
         currentVisibleRadius = viewport.visibleRadius
         mapCameraCenter = viewport.center
         currentViewport = viewport
         scheduleViewportDrivenEventLoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
-
-        let lastCenter = lastViewportPOIRequest?.center
-        let movementDistance: CLLocationDistance = {
-            guard let lastCenter else { return .greatestFiniteMagnitude }
-            return CLLocation(latitude: lastCenter.latitude, longitude: lastCenter.longitude)
-                .distance(from: CLLocation(latitude: viewport.center.latitude, longitude: viewport.center.longitude))
-        }()
-        let movementThreshold = max(viewport.visibleRadius * 0.18, 3_000)
-        let shouldRefreshViewport = radiusDelta > max(previousRadius * 0.12, 2_500)
-            || movementDistance > movementThreshold
-            || mixedPOIs.isEmpty
-
-        guard shouldRefreshViewport else { return }
+        reapplyVisiblePOIs(center: viewport.center)
         scheduleViewportDrivenPOILoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
+    }
+
+    private func reapplyVisiblePOIs(center: CLLocationCoordinate2D) {
+        guard !allCachedPOIs.isEmpty else { return }
+        applyLoadedPOIs(allCachedPOIs, center: center)
     }
 
     private func openInMaps(poi: MapPOI) {
@@ -1569,7 +1551,7 @@ struct MapExploreView: View {
         }
         lastViewportEventRequestSignature = request.signature
 
-        let cachedEvents = aggregatedViewportEvents(for: request, using: viewportEventTileCache)
+        let cachedEvents = aggregatedAllCachedViewportEvents()
         if !cachedEvents.isEmpty || hasResolvedViewportEventFeed {
             viewportExternalEvents = cachedEvents
         }
@@ -1585,7 +1567,6 @@ struct MapExploreView: View {
 
         pendingViewportEventLoadTask?.cancel()
         pendingViewportEventLoadTask = Task {
-            try? await Task.sleep(for: .milliseconds(140))
             guard !Task.isCancelled else { return }
 
             let service = SupabaseEventViewportTileService.shared
@@ -1615,28 +1596,30 @@ struct MapExploreView: View {
 
             guard !Task.isCancelled, !loadedBundles.isEmpty else { return }
 
-            await MainActor.run {
-                guard request.signature == lastViewportEventRequestSignature else { return }
-
-                var updatedCache = viewportEventTileCache
-                for bundle in loadedBundles {
-                    for tile in bundle.tiles {
-                        let cacheKey = viewportTileCacheKey(for: tile.tile)
-                        var cachedSnapshots = updatedCache[cacheKey] ?? []
-                        if let existingIndex = cachedSnapshots.firstIndex(where: { $0.id == tile.id }) {
-                            cachedSnapshots[existingIndex] = tile
-                        } else {
-                            cachedSnapshots.append(tile)
-                        }
-                        updatedCache[cacheKey] = cachedSnapshots
+            var updatedCache = viewportEventTileCache
+            for bundle in loadedBundles {
+                for tile in bundle.tiles {
+                    let cacheKey = viewportTileCacheKey(for: tile.tile)
+                    var cachedSnapshots = updatedCache[cacheKey] ?? []
+                    if let existingIndex = cachedSnapshots.firstIndex(where: { $0.id == tile.id }) {
+                        cachedSnapshots[existingIndex] = tile
+                    } else {
+                        cachedSnapshots.append(tile)
                     }
+                    updatedCache[cacheKey] = cachedSnapshots
                 }
-
-                viewportEventTileCache = updatedCache
-                viewportExternalEvents = aggregatedViewportEvents(for: request, using: updatedCache)
-                hasResolvedViewportEventFeed = true
             }
+
+            viewportEventTileCache = updatedCache
+            viewportExternalEvents = aggregatedAllCachedViewportEvents()
+            hasResolvedViewportEventFeed = true
         }
+    }
+
+    private func aggregatedAllCachedViewportEvents() -> [ExternalEvent] {
+        viewportEventTileCache.values
+            .flatMap { $0 }
+            .flatMap(\.mergedEvents)
     }
 
     private func makeViewportEventRequest(for viewport: ExploreMapViewport) -> ViewportEventRequest {
@@ -1791,7 +1774,6 @@ struct MapExploreView: View {
         lastViewportPOIRequest = nextRequest
         pendingViewportPOILoadTask?.cancel()
         pendingViewportPOILoadTask = Task {
-            try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
             let location = CLLocation(latitude: center.latitude, longitude: center.longitude)
             await reloadNearbyQuests(near: location, visibleRadius: visibleRadius, viewport: viewport)
@@ -1923,7 +1905,11 @@ struct MapExploreView: View {
             deduplicated.append(poi)
         }
 
-        mixedPOIs = Array(deduplicated.prefix(Self.maximumVisiblePOIs))
+        let newPOIs = Array(deduplicated.prefix(Self.maximumVisiblePOIs))
+        let oldIDs = Set(mixedPOIs.map(\.id))
+        let newIDs = Set(newPOIs.map(\.id))
+        guard oldIDs != newIDs else { return }
+        mixedPOIs = newPOIs
     }
 
     private func isCancelledExternalEvent(_ event: ExternalEvent) -> Bool {

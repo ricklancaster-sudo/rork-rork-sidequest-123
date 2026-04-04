@@ -128,54 +128,60 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
             return "\(route.id)_\(firstCoordinate?.latitude ?? 0)_\(firstCoordinate?.longitude ?? 0)_\(route.coordinates.count)"
         }.joined(separator: "|")
 
-        guard encounterSignature != lastEncounterSignature
-            || districtSignature != lastDistrictSignature
-            || zoneSignature != lastZoneSignature
-            || routeSignature != lastRouteSignature
-        else {
+        let encounterChanged = encounterSignature != lastEncounterSignature
+        let districtChanged = districtSignature != lastDistrictSignature
+        let zoneChanged = zoneSignature != lastZoneSignature
+        let routeChanged = routeSignature != lastRouteSignature
+
+        guard encounterChanged || districtChanged || zoneChanged || routeChanged else {
             return
         }
 
-        lastEncounterSignature = encounterSignature
-        lastDistrictSignature = districtSignature
-        lastZoneSignature = zoneSignature
-        lastRouteSignature = routeSignature
-
-        syncEncounterAnnotations(on: mapView)
-        syncDistrictAnnotations(on: mapView)
-
-        zoneStyles.removeAll(keepingCapacity: true)
-        districtStyles.removeAll(keepingCapacity: true)
-        routeStyles.removeAll(keepingCapacity: true)
-        mapView.removeOverlays(mapView.overlays)
-
-        hasApplied3DCafe = false
-        if enablesCafe3DAnnotations {
-            fetchCafeRoadBearings(for: parent.encounters, on: mapView)
+        if encounterChanged {
+            lastEncounterSignature = encounterSignature
+            syncEncounterAnnotations(on: mapView)
+            if enablesCafe3DAnnotations {
+                hasApplied3DCafe = false
+                fetchCafeRoadBearings(for: parent.encounters, on: mapView)
+                if CafeBuildingRenderer.shared.isReady {
+                    hasApplied3DCafe = true
+                }
+            }
         }
 
-        if enablesCafe3DAnnotations && CafeBuildingRenderer.shared.isReady {
-            hasApplied3DCafe = true
+        if districtChanged {
+            lastDistrictSignature = districtSignature
+            syncDistrictAnnotations(on: mapView)
         }
 
-        for district in parent.districts {
-            var coordinates = district.coordinates
-            let polygon = MKPolygon(coordinates: &coordinates, count: coordinates.count)
-            districtStyles[ObjectIdentifier(polygon)] = district
-            mapView.addOverlay(polygon, level: .aboveRoads)
-        }
+        if districtChanged || zoneChanged || routeChanged {
+            lastZoneSignature = zoneSignature
+            lastRouteSignature = routeSignature
 
-        for route in parent.routes {
-            var coordinates = route.coordinates
-            let polyline = MKPolyline(coordinates: &coordinates, count: coordinates.count)
-            routeStyles[ObjectIdentifier(polyline)] = route
-            mapView.addOverlay(polyline, level: .aboveRoads)
-        }
+            zoneStyles.removeAll(keepingCapacity: true)
+            districtStyles.removeAll(keepingCapacity: true)
+            routeStyles.removeAll(keepingCapacity: true)
+            mapView.removeOverlays(mapView.overlays)
 
-        for zone in parent.zones {
-            let circle = MKCircle(center: zone.centerCoordinate, radius: zone.radius)
-            zoneStyles[ObjectIdentifier(circle)] = zone
-            mapView.addOverlay(circle, level: .aboveRoads)
+            for district in parent.districts {
+                var coordinates = district.coordinates
+                let polygon = MKPolygon(coordinates: &coordinates, count: coordinates.count)
+                districtStyles[ObjectIdentifier(polygon)] = district
+                mapView.addOverlay(polygon, level: .aboveRoads)
+            }
+
+            for route in parent.routes {
+                var coordinates = route.coordinates
+                let polyline = MKPolyline(coordinates: &coordinates, count: coordinates.count)
+                routeStyles[ObjectIdentifier(polyline)] = route
+                mapView.addOverlay(polyline, level: .aboveRoads)
+            }
+
+            for zone in parent.zones {
+                let circle = MKCircle(center: zone.centerCoordinate, radius: zone.radius)
+                zoneStyles[ObjectIdentifier(circle)] = zone
+                mapView.addOverlay(circle, level: .aboveRoads)
+            }
         }
     }
 
@@ -419,24 +425,35 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
         }
     }
 
+    private func buildViewport(from mapView: MKMapView) -> ExploreMapViewport {
+        let visibleRect = mapView.visibleMapRect
+        let northWest = MKMapPoint(x: visibleRect.minX, y: visibleRect.minY).coordinate
+        let northEast = MKMapPoint(x: visibleRect.maxX, y: visibleRect.minY).coordinate
+        let southWest = MKMapPoint(x: visibleRect.minX, y: visibleRect.maxY).coordinate
+        let southEast = MKMapPoint(x: visibleRect.maxX, y: visibleRect.maxY).coordinate
+        let diagonalDistance = CLLocation(latitude: northWest.latitude, longitude: northWest.longitude)
+            .distance(from: CLLocation(latitude: southEast.latitude, longitude: southEast.longitude))
+        return ExploreMapViewport(
+            center: mapView.centerCoordinate,
+            visibleRadius: max(diagonalDistance / 2, 800),
+            northEast: northEast,
+            northWest: northWest,
+            southEast: southEast,
+            southWest: southWest,
+            mapRect: visibleRect
+        )
+    }
+
+    nonisolated func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
+        MainActor.assumeIsolated {
+            let viewport = buildViewport(from: mapView)
+            parent.onRegionChanged(viewport)
+        }
+    }
+
     nonisolated func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
         MainActor.assumeIsolated {
-            let visibleRect = mapView.visibleMapRect
-            let northWest = MKMapPoint(x: visibleRect.minX, y: visibleRect.minY).coordinate
-            let northEast = MKMapPoint(x: visibleRect.maxX, y: visibleRect.minY).coordinate
-            let southWest = MKMapPoint(x: visibleRect.minX, y: visibleRect.maxY).coordinate
-            let southEast = MKMapPoint(x: visibleRect.maxX, y: visibleRect.maxY).coordinate
-            let diagonalDistance = CLLocation(latitude: northWest.latitude, longitude: northWest.longitude)
-                .distance(from: CLLocation(latitude: southEast.latitude, longitude: southEast.longitude))
-            let viewport = ExploreMapViewport(
-                center: mapView.centerCoordinate,
-                visibleRadius: max(diagonalDistance / 2, 800),
-                northEast: northEast,
-                northWest: northWest,
-                southEast: southEast,
-                southWest: southWest,
-                mapRect: visibleRect
-            )
+            let viewport = buildViewport(from: mapView)
             parent.onRegionChanged(viewport)
 
             if enablesCafe3DAnnotations && CafeBuildingRenderer.shared.isReady && !hasApplied3DCafe {
