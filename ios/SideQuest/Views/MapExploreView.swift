@@ -812,53 +812,117 @@ struct MapExploreView: View {
         .library, .bookstore, .museum, .artGallery, .communityCenter, .placeOfWorship, .volunteerCenter
     ]
 
-    private func applyZoomContentFilter(_ encounters: [ExploreEncounter]) -> [ExploreEncounter] {
-        if currentVisibleRadius > 500_000 {
-            return Array(encounters.filter {
-                $0.kind == .limitedEvent && $0.eventTimePriority.forceFullPin
-            }.prefix(40))
-        } else if currentVisibleRadius > 100_000 {
-            return Array(encounters.filter { $0.kind == .limitedEvent }.prefix(60))
-        } else if currentVisibleRadius > 20_000 {
-            let events = encounters.filter { $0.kind == .limitedEvent }
-            let activePOIs = encounters.filter { $0.kind == .activeQuest || $0.kind == .mainQuest }
-            return Array((events + activePOIs).prefix(80))
+    private static let densityLimit: Int = 60
+
+    private func encounterPinScore(_ encounter: ExploreEncounter) -> Int {
+        var score: Int = 0
+        switch encounter.kind {
+        case .activeQuest: score += 1000
+        case .mainQuest: score += 900
+        case .limitedEvent: score += 800
+        case .sideQuest: score += 200
+        case .daily: score += 100
+        case .hotspot: score += 50
+        case .visitedShrine: score += 10
         }
-        return encounters
+        switch encounter.eventTimePriority {
+        case .live: score += 500
+        case .imminent: score += 400
+        case .soon: score += 300
+        case .today: score += 200
+        case .later: score += 50
+        case .none: break
+        }
+        return score
+    }
+
+    private func applySmartPinHierarchy(_ encounters: [ExploreEncounter]) -> [ExploreEncounter] {
+        let isStreetZoom = currentVisibleRadius <= 5_000
+        let isDistrictZoom = currentVisibleRadius <= 20_000
+
+        var events: [ExploreEncounter] = []
+        var pois: [ExploreEncounter] = []
+        for encounter in encounters {
+            if encounter.kind == .limitedEvent || encounter.externalEvent != nil {
+                events.append(encounter)
+            } else {
+                pois.append(encounter)
+            }
+        }
+
+        events.sort { encounterPinScore($0) > encounterPinScore($1) }
+        pois.sort { encounterPinScore($0) > encounterPinScore($1) }
+
+        if currentVisibleRadius > 500_000 {
+            return Array(events.filter { $0.eventTimePriority.forceFullPin }.prefix(Self.densityLimit))
+        }
+
+        if currentVisibleRadius > 100_000 {
+            return Array(events.prefix(Self.densityLimit))
+        }
+
+        var result: [ExploreEncounter] = []
+        let eventBudget: Int
+        let poiBudget: Int
+
+        if isStreetZoom {
+            eventBudget = min(events.count, 40)
+            poiBudget = Self.densityLimit - eventBudget
+        } else if isDistrictZoom {
+            eventBudget = min(events.count, 50)
+            let activeOrMain = pois.filter { $0.kind == .activeQuest || $0.kind == .mainQuest }
+            result.append(contentsOf: Array(events.prefix(eventBudget)))
+            result.append(contentsOf: Array(activeOrMain.prefix(Self.densityLimit - result.count)))
+            return Array(result.prefix(Self.densityLimit))
+        } else {
+            eventBudget = min(events.count, Self.densityLimit)
+            let activeOnly = pois.filter { $0.kind == .activeQuest }
+            result.append(contentsOf: Array(events.prefix(eventBudget)))
+            result.append(contentsOf: Array(activeOnly.prefix(Self.densityLimit - result.count)))
+            return Array(result.prefix(Self.densityLimit))
+        }
+
+        result.append(contentsOf: Array(events.prefix(eventBudget)))
+        result.append(contentsOf: Array(pois.prefix(poiBudget)))
+        return Array(result.prefix(Self.densityLimit))
     }
 
     private var filteredEncounterList: [ExploreEncounter] {
-        let zoomFiltered = applyZoomContentFilter(encounterList)
-        guard selectedMapFilter != .all else { return zoomFiltered }
-        return zoomFiltered.filter { encounter in
-            switch selectedMapFilter {
-            case .all:
-                return true
-            case .nightlife:
-                guard let event = encounter.externalEvent else { return false }
-                return event.eventType == .partyNightlife || event.recordKind == .venueNight
-            case .concerts:
-                guard let event = encounter.externalEvent else { return false }
-                return event.eventType == .concert
-            case .sports:
-                guard let event = encounter.externalEvent else { return false }
-                return event.eventType == .sportsEvent
-            case .races:
-                guard let event = encounter.externalEvent else { return false }
-                return [.groupRun, .race5k, .race10k, .raceHalfMarathon, .raceMarathon].contains(event.eventType)
-            case .community:
-                guard let event = encounter.externalEvent else { return false }
-                return event.eventType == .socialCommunityEvent || event.eventType == .weekendActivity
-            case .liveEvents:
-                return encounter.kind == .limitedEvent
-            case .fitness:
-                return encounter.externalEvent == nil && Self.fitnessCategories.contains(encounter.poi.category)
-            case .outdoors:
-                return encounter.externalEvent == nil && Self.outdoorsCategories.contains(encounter.poi.category)
-            case .culture:
-                return encounter.externalEvent == nil && Self.cultureCategories.contains(encounter.poi.category)
+        let categoryFiltered: [ExploreEncounter]
+        if selectedMapFilter == .all {
+            categoryFiltered = encounterList
+        } else {
+            categoryFiltered = encounterList.filter { encounter in
+                switch selectedMapFilter {
+                case .all:
+                    return true
+                case .nightlife:
+                    guard let event = encounter.externalEvent else { return false }
+                    return event.eventType == .partyNightlife || event.recordKind == .venueNight
+                case .concerts:
+                    guard let event = encounter.externalEvent else { return false }
+                    return event.eventType == .concert
+                case .sports:
+                    guard let event = encounter.externalEvent else { return false }
+                    return event.eventType == .sportsEvent
+                case .races:
+                    guard let event = encounter.externalEvent else { return false }
+                    return [.groupRun, .race5k, .race10k, .raceHalfMarathon, .raceMarathon].contains(event.eventType)
+                case .community:
+                    guard let event = encounter.externalEvent else { return false }
+                    return event.eventType == .socialCommunityEvent || event.eventType == .weekendActivity
+                case .liveEvents:
+                    return encounter.kind == .limitedEvent
+                case .fitness:
+                    return encounter.externalEvent == nil && Self.fitnessCategories.contains(encounter.poi.category)
+                case .outdoors:
+                    return encounter.externalEvent == nil && Self.outdoorsCategories.contains(encounter.poi.category)
+                case .culture:
+                    return encounter.externalEvent == nil && Self.cultureCategories.contains(encounter.poi.category)
+                }
             }
         }
+        return applySmartPinHierarchy(categoryFiltered)
     }
 
     private var topChrome: some View {
@@ -1598,8 +1662,9 @@ struct MapExploreView: View {
         lastViewportEventRequestSignature = combinedSignature
 
         let cachedEvents = aggregatedAllCachedViewportEvents()
-        if !cachedEvents.isEmpty || hasResolvedViewportEventFeed {
+        if !cachedEvents.isEmpty {
             viewportExternalEvents = cachedEvents
+            hasResolvedViewportEventFeed = true
         }
 
         let missingIntents = request.intents.filter { intent in
@@ -1637,10 +1702,8 @@ struct MapExploreView: View {
             return
         }
 
-        if !needsFetch && needsStaleRefresh {
-            viewportExternalEvents = cachedEvents
-            hasResolvedViewportEventFeed = true
-        }
+        viewportExternalEvents = cachedEvents
+        hasResolvedViewportEventFeed = true
 
         pendingViewportEventLoadTask?.cancel()
         pendingViewportEventLoadTask = Task {
@@ -1929,8 +1992,9 @@ struct MapExploreView: View {
         lastSupabasePOITileSignature = signature
 
         let cachedPOIs = aggregatedAllSupabasePOIs()
-        if !cachedPOIs.isEmpty || hasResolvedSupabasePOIFeed {
+        if !cachedPOIs.isEmpty {
             mergeSupabasePOIs(cachedPOIs)
+            hasResolvedSupabasePOIFeed = true
         }
 
         let poiStaleTTL: TimeInterval = 24 * 60 * 60
@@ -1967,10 +2031,8 @@ struct MapExploreView: View {
             return
         }
 
-        if !needsFetch && needsStaleRefresh {
-            mergeSupabasePOIs(cachedPOIs)
-            hasResolvedSupabasePOIFeed = true
-        }
+        mergeSupabasePOIs(cachedPOIs)
+        hasResolvedSupabasePOIFeed = true
 
         pendingSupabasePOILoadTask?.cancel()
         pendingSupabasePOILoadTask = Task {

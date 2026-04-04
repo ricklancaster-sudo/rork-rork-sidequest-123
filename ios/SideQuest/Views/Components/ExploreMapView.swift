@@ -733,16 +733,31 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
         let category = encounter.poi.category
         let color = category.uiColor
         let timePriority = encounter.eventTimePriority
+        let isEvent = encounter.kind == .limitedEvent || encounter.externalEvent != nil
         let isHigh = encounter.kind.isHighPriority || timePriority.forceFullPin
         let isVisited = encounter.kind == .visitedShrine
-        let useCompactMode = zoomTier != .street && !isHigh && !timePriority.forceFullPin
+        let isPOI = !isEvent && encounter.kind != .activeQuest && encounter.kind != .mainQuest
         currentZoomTier = zoomTier
+
+        if isEvent {
+            layer.zPosition = 100
+        } else if isHigh {
+            layer.zPosition = 80
+        } else {
+            layer.zPosition = 10
+        }
+
+        if isPOI && zoomTier != .street {
+            configureCompactDot(category: category, color: color, encounter: encounter, isVisited: isVisited)
+            return
+        }
 
         if timePriority == .later && encounter.kind == .limitedEvent {
             configureCompactDot(category: category, color: color, encounter: encounter, isVisited: false)
             return
         }
 
+        let useCompactMode = zoomTier != .street && !isHigh && !timePriority.forceFullPin
         if useCompactMode {
             configureCompactDot(category: category, color: color, encounter: encounter, isVisited: isVisited)
             return
@@ -823,15 +838,20 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
             buildingImageView.transform = .identity
         }
 
-        if timePriority.forceFullPin || !encounter.kind.isClusterable {
+        if isEvent {
+            if timePriority.forceFullPin {
+                clusteringIdentifier = nil
+                displayPriority = .required
+            } else {
+                clusteringIdentifier = "event_cluster"
+                displayPriority = .defaultHigh
+            }
+        } else if !encounter.kind.isClusterable {
             clusteringIdentifier = nil
             displayPriority = .required
-        } else if encounter.kind.isClusterable {
-            clusteringIdentifier = "encounter_cluster"
-            displayPriority = isHigh ? .required : .defaultHigh
         } else {
-            clusteringIdentifier = nil
-            displayPriority = .required
+            clusteringIdentifier = "poi_cluster"
+            displayPriority = isPOI ? .defaultLow : .defaultHigh
         }
 
         if animationsEnabled && timePriority.isAnimated {
@@ -851,28 +871,38 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
         compactDot.isHidden = false
         compactDotIcon.isHidden = false
 
-        let dotSize: CGFloat = currentZoomTier == .metro ? 14 : 20
+        let isEvent = encounter.kind == .limitedEvent || encounter.externalEvent != nil
+        let isEventMediumDot = isEvent && (encounter.eventTimePriority == .today || encounter.eventTimePriority == .soon)
+
+        let dotSize: CGFloat
+        if isEventMediumDot {
+            dotSize = currentZoomTier == .metro ? 18 : 24
+        } else {
+            dotSize = currentZoomTier == .metro ? 14 : 20
+        }
         compactDotWidthConstraint?.constant = dotSize
         compactDotHeightConstraint?.constant = dotSize
         compactDot.layer.cornerRadius = dotSize / 2
 
-        let dotAlpha: CGFloat = isVisited ? 0.5 : 0.85
+        let dotAlpha: CGFloat = isVisited ? 0.5 : (isEvent ? 0.92 : 0.85)
         compactDot.backgroundColor = color.withAlphaComponent(dotAlpha)
-        compactDot.layer.borderColor = UIColor.white.withAlphaComponent(0.7).cgColor
-        compactDot.layer.borderWidth = currentZoomTier == .metro ? 1.0 : 1.5
+        compactDot.layer.borderColor = UIColor.white.withAlphaComponent(isEvent ? 0.85 : 0.7).cgColor
+        compactDot.layer.borderWidth = isEvent ? 2.0 : (currentZoomTier == .metro ? 1.0 : 1.5)
 
-        let iconSize: CGFloat = currentZoomTier == .metro ? 7 : 9
+        let iconSize: CGFloat = isEventMediumDot ? 10 : (currentZoomTier == .metro ? 7 : 9)
         compactDotIcon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: iconSize, weight: .bold)
-        compactDotIcon.image = UIImage(systemName: isVisited ? "checkmark" : category.icon)
+        compactDotIcon.image = UIImage(systemName: isVisited ? "checkmark" : (isEvent ? "calendar" : category.icon))
         compactDotIcon.tintColor = .white
 
         layer.shadowColor = color.cgColor
-        layer.shadowRadius = 6
-        layer.shadowOpacity = 0.3
+        layer.shadowRadius = isEvent ? 8 : 6
+        layer.shadowOpacity = isEvent ? 0.4 : 0.3
         layer.shadowOffset = CGSize(width: 0, height: 3)
 
-        clusteringIdentifier = "encounter_cluster"
-        displayPriority = .defaultHigh
+        layer.zPosition = isEvent ? 90 : 10
+
+        clusteringIdentifier = isEvent ? "event_cluster" : "poi_cluster"
+        displayPriority = isEvent ? .defaultHigh : .defaultLow
 
         centerOffset = CGPoint(x: 0, y: -(dotSize / 2))
 
