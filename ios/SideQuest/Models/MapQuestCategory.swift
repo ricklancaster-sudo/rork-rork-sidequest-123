@@ -299,6 +299,37 @@ nonisolated enum MapQuestCategory: String, CaseIterable, Identifiable, Sendable 
         }
     }
 
+    var compactIcon: String {
+        switch self {
+        case .cafe: "☕"
+        case .gym: "🏋️"
+        case .park: "🌳"
+        case .library: "📚"
+        case .trail: "🥾"
+        case .pool: "🏊"
+        case .bookstore: "📖"
+        case .museum: "🏛️"
+        case .beach: "🏖️"
+        case .basketballCourt: "🏀"
+        case .yogaStudio: "🧘"
+        case .restaurant: "🍽️"
+        case .farmersMarket: "🥕"
+        case .dogPark: "🐕"
+        case .skatePark: "🛹"
+        case .rockClimbingGym: "🧗"
+        case .bowlingAlley: "🎳"
+        case .artGallery: "🎨"
+        case .communityCenter: "👥"
+        case .placeOfWorship: "🙏"
+        case .volunteerCenter: "❤️"
+        case .danceStudio: "💃"
+        case .martialArts: "🥋"
+        case .tennisCourt: "🎾"
+        case .lake: "🌊"
+        case .bikePath: "🚲"
+        }
+    }
+
     var requiresEvidence: Bool {
         switch self {
         case .rockClimbingGym, .yogaStudio, .farmersMarket, .artGallery,

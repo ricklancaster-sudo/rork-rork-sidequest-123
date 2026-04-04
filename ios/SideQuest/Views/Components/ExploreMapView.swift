@@ -10,6 +10,23 @@ nonisolated struct ExploreMapViewport: Sendable {
     let southEast: CLLocationCoordinate2D
     let southWest: CLLocationCoordinate2D
     let mapRect: MKMapRect
+    let cameraDistance: Double
+}
+
+nonisolated enum MapZoomTier: Sendable, Equatable {
+    case street
+    case district
+    case metro
+
+    init(cameraDistance: Double) {
+        if cameraDistance < 5_000 {
+            self = .street
+        } else if cameraDistance < 15_000 {
+            self = .district
+        } else {
+            self = .metro
+        }
+    }
 }
 
 struct ExploreMapView: UIViewRepresentable {
@@ -93,6 +110,9 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
     weak var mapViewRef: MKMapView?
     private var regionChangeDebounceTimer: Timer?
     private var lastThrottledViewportTime: CFAbsoluteTime = 0
+    private var currentZoomTier: MapZoomTier = .street
+    private var currentCameraDistance: Double = 1800
+    private var visibleAnnotationCount: Int = 0
 
     init(parent: ExploreMapView) {
         self.parent = parent
@@ -198,6 +218,9 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
             }
         }
 
+        visibleAnnotationCount = parent.encounters.count
+        let animationsEnabled = visibleAnnotationCount <= 50
+
         var annotationsToAdd: [ExploreEncounterAnnotation] = []
         for encounter in parent.encounters {
             if let existingAnnotation = encounterAnnotationsByID[encounter.id] {
@@ -207,7 +230,7 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
                     existingAnnotation.coordinate = encounter.coordinate
                 }
                 if let view = mapView.view(for: existingAnnotation) as? ExploreEncounterAnnotationView {
-                    view.configure(with: encounter)
+                    view.configure(with: encounter, zoomTier: currentZoomTier, animationsEnabled: animationsEnabled)
                     if enablesCafe3DAnnotations,
                        encounter.poi.category == .cafe,
                        CafeBuildingRenderer.shared.isReady {
@@ -354,7 +377,8 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
                 guard let encounterView = view as? ExploreEncounterAnnotationView else {
                     return view
                 }
-                encounterView.configure(with: encounterAnnotation.encounter)
+                let animationsEnabled = visibleAnnotationCount <= 50
+                encounterView.configure(with: encounterAnnotation.encounter, zoomTier: currentZoomTier, animationsEnabled: animationsEnabled)
                 let encounter = encounterAnnotation.encounter
                 if enablesCafe3DAnnotations && encounter.poi.category == .cafe && CafeBuildingRenderer.shared.isReady {
                     let bearing = roadBearingForPOI(encounter.poi)
@@ -442,7 +466,8 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
             northWest: northWest,
             southEast: southEast,
             southWest: southWest,
-            mapRect: visibleRect
+            mapRect: visibleRect,
+            cameraDistance: mapView.camera.centerCoordinateDistance
         )
     }
 
@@ -472,6 +497,18 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
             }
 
             let distance = mapView.camera.centerCoordinateDistance
+            currentCameraDistance = distance
+            let newTier = MapZoomTier(cameraDistance: distance)
+            let tierChanged = newTier != currentZoomTier
+            currentZoomTier = newTier
+
+            let encounterAnnotations = mapView.annotations.compactMap { $0 as? ExploreEncounterAnnotation }
+            visibleAnnotationCount = encounterAnnotations.count
+
+            if tierChanged {
+                updateAllAnnotationsForZoomTier(on: mapView)
+            }
+
             let referenceDistance: Double = 3000
             let newScale = CGFloat(pow(distance / referenceDistance, 0.18))
             let clampedScale = min(max(newScale, 0.85), 1.35)
@@ -479,6 +516,15 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
                 currentZoomScale = clampedScale
                 updateCafeAnnotationScales(on: mapView)
             }
+        }
+    }
+
+    private func updateAllAnnotationsForZoomTier(on mapView: MKMapView) {
+        let animationsEnabled = visibleAnnotationCount <= 50
+        for annotation in mapView.annotations {
+            guard let encounterAnnotation = annotation as? ExploreEncounterAnnotation,
+                  let view = mapView.view(for: annotation) as? ExploreEncounterAnnotationView else { continue }
+            view.configure(with: encounterAnnotation.encounter, zoomTier: currentZoomTier, animationsEnabled: animationsEnabled)
         }
     }
 
@@ -595,9 +641,14 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
     private let badgeStack = UIStackView()
     private let glowRing = UIView()
     private let auraRing = UIView()
+    private let compactDot = UIView()
+    private let compactDotIcon = UIImageView()
     private var iconBadgeWidthConstraint: NSLayoutConstraint?
+    private var compactDotWidthConstraint: NSLayoutConstraint?
+    private var compactDotHeightConstraint: NSLayoutConstraint?
     private var isCafeWith3D: Bool = false
     private var cafeZoomScale: CGFloat = 1.0
+    private var currentZoomTier: MapZoomTier = .street
 
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
@@ -623,12 +674,18 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
         buildingImageView.layer.removeAllAnimations()
         isCafeWith3D = false
         cafeZoomScale = 1.0
+        currentZoomTier = .street
         iconLabel.text = nil
         iconLabel.isHidden = true
         iconBadgeWidthConstraint?.constant = 24
         iconBadge.layer.cornerRadius = 12
         transform = .identity
         centerOffset = CGPoint(x: 0, y: -40)
+        buildingImageView.isHidden = false
+        compactDot.isHidden = true
+        compactDotIcon.isHidden = true
+        iconBadge.isHidden = false
+        clusteringIdentifier = nil
     }
 
     override func setSelected(_ selected: Bool, animated: Bool) {
@@ -664,11 +721,22 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
         }
     }
 
-    func configure(with encounter: ExploreEncounter) {
+    func configure(with encounter: ExploreEncounter, zoomTier: MapZoomTier = .street, animationsEnabled: Bool = true) {
         let category = encounter.poi.category
         let color = category.uiColor
         let isHigh = encounter.kind.isHighPriority
         let isVisited = encounter.kind == .visitedShrine
+        let useCompactMode = zoomTier != .street && !isHigh
+        currentZoomTier = zoomTier
+
+        if useCompactMode {
+            configureCompactDot(category: category, color: color, encounter: encounter, isVisited: isVisited)
+            return
+        }
+
+        buildingImageView.isHidden = false
+        compactDot.isHidden = true
+        compactDotIcon.isHidden = true
 
         let buildingSize = CGSize(width: 72, height: 84)
         if let assetName = encounter.mapPinAssetName,
@@ -693,6 +761,7 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
         iconImageView.image = UIImage(systemName: icon)
         iconImageView.tintColor = .white
 
+        iconBadge.isHidden = false
         iconBadge.backgroundColor = isVisited ? UIColor(white: 0.4, alpha: 0.9) : color.withAlphaComponent(0.92)
         iconBadge.layer.borderColor = UIColor.white.withAlphaComponent(isHigh ? 0.95 : 0.6).cgColor
         if let countdownText = encounter.countdownText, !countdownText.isEmpty {
@@ -730,22 +799,80 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
             buildingImageView.transform = .identity
         }
 
-        displayPriority = .required
-        clusteringIdentifier = nil
+        if encounter.kind.isClusterable {
+            clusteringIdentifier = "encounter_cluster"
+            displayPriority = isHigh ? .required : .defaultHigh
+        } else {
+            clusteringIdentifier = nil
+            displayPriority = .required
+        }
 
-        animateStructure(highPriority: isHigh)
+        if animationsEnabled {
+            animateStructure(highPriority: isHigh)
+        } else {
+            stripAnimations()
+        }
+    }
+
+    private func configureCompactDot(category: MapQuestCategory, color: UIColor, encounter: ExploreEncounter, isVisited: Bool) {
+        buildingImageView.isHidden = true
+        iconBadge.isHidden = true
+        glowRing.isHidden = true
+        auraRing.isHidden = true
+        compactDot.isHidden = false
+        compactDotIcon.isHidden = false
+
+        let dotSize: CGFloat = currentZoomTier == .metro ? 14 : 20
+        compactDotWidthConstraint?.constant = dotSize
+        compactDotHeightConstraint?.constant = dotSize
+        compactDot.layer.cornerRadius = dotSize / 2
+
+        let dotAlpha: CGFloat = isVisited ? 0.5 : 0.85
+        compactDot.backgroundColor = color.withAlphaComponent(dotAlpha)
+        compactDot.layer.borderColor = UIColor.white.withAlphaComponent(0.7).cgColor
+        compactDot.layer.borderWidth = currentZoomTier == .metro ? 1.0 : 1.5
+
+        let iconSize: CGFloat = currentZoomTier == .metro ? 7 : 9
+        compactDotIcon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: iconSize, weight: .bold)
+        compactDotIcon.image = UIImage(systemName: isVisited ? "checkmark" : category.icon)
+        compactDotIcon.tintColor = .white
+
+        layer.shadowColor = color.cgColor
+        layer.shadowRadius = 6
+        layer.shadowOpacity = 0.3
+        layer.shadowOffset = CGSize(width: 0, height: 3)
+
+        clusteringIdentifier = "encounter_cluster"
+        displayPriority = .defaultHigh
+
+        centerOffset = CGPoint(x: 0, y: -(dotSize / 2))
+
+        stripAnimations()
+    }
+
+    private func stripAnimations() {
+        buildingImageView.layer.removeAllAnimations()
+        glowRing.layer.removeAllAnimations()
+        auraRing.layer.removeAllAnimations()
+        iconBadge.layer.removeAllAnimations()
     }
 
     private func setupViews() {
-        [auraRing, glowRing, buildingImageView, iconBadge, iconImageView, iconLabel, badgeStack].forEach {
+        [auraRing, glowRing, buildingImageView, iconBadge, iconImageView, iconLabel, badgeStack, compactDot, compactDotIcon].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
         }
 
         addSubview(auraRing)
         addSubview(glowRing)
         addSubview(buildingImageView)
+        addSubview(compactDot)
+        compactDot.addSubview(compactDotIcon)
         addSubview(iconBadge)
         iconBadge.addSubview(badgeStack)
+
+        compactDot.isHidden = true
+        compactDotIcon.isHidden = true
+        compactDotIcon.contentMode = .scaleAspectFit
 
         buildingImageView.contentMode = .scaleAspectFit
 
@@ -779,6 +906,8 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
         glowRing.isHidden = true
 
         iconBadgeWidthConstraint = iconBadge.widthAnchor.constraint(equalToConstant: 24)
+        compactDotWidthConstraint = compactDot.widthAnchor.constraint(equalToConstant: 20)
+        compactDotHeightConstraint = compactDot.heightAnchor.constraint(equalToConstant: 20)
 
         NSLayoutConstraint.activate([
             buildingImageView.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -792,6 +921,14 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
             buildingImageView.bottomAnchor.constraint(equalTo: bottomAnchor),
             buildingImageView.widthAnchor.constraint(equalToConstant: 72),
             buildingImageView.heightAnchor.constraint(equalToConstant: 84),
+
+            compactDot.centerXAnchor.constraint(equalTo: centerXAnchor),
+            compactDot.centerYAnchor.constraint(equalTo: centerYAnchor),
+            compactDotWidthConstraint!,
+            compactDotHeightConstraint!,
+
+            compactDotIcon.centerXAnchor.constraint(equalTo: compactDot.centerXAnchor),
+            compactDotIcon.centerYAnchor.constraint(equalTo: compactDot.centerYAnchor),
 
             iconBadge.centerXAnchor.constraint(equalTo: centerXAnchor),
             iconBadge.bottomAnchor.constraint(equalTo: buildingImageView.topAnchor, constant: 14),
@@ -872,6 +1009,7 @@ final class ExploreClusterAnnotationView: MKAnnotationView {
     private let coreView = UIView()
     private let glowView = UIView()
     private let countLabel = UILabel()
+    private let breakdownLabel = UILabel()
     private let iconView = UIImageView()
 
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
@@ -899,19 +1037,36 @@ final class ExploreClusterAnnotationView: MKAnnotationView {
         glowView.layer.borderColor = color.withAlphaComponent(0.75).cgColor
         coreView.backgroundColor = UIColor(white: 0.08, alpha: 0.92)
         coreView.layer.borderColor = color.withAlphaComponent(0.95).cgColor
+
+        var categoryCounts: [MapQuestCategory: Int] = [:]
+        for annotation in annotations {
+            let cat = annotation.encounter.poi.category
+            categoryCounts[cat, default: 0] += 1
+        }
+        let topCategories = categoryCounts.sorted { $0.value > $1.value }.prefix(3)
+        let breakdownText = topCategories.map { "\($0.key.compactIcon)\($0.value)" }.joined(separator: " ")
+
         countLabel.text = "\(cluster.memberAnnotations.count)"
+        if !breakdownText.isEmpty, annotations.count > 3 {
+            breakdownLabel.text = breakdownText
+            breakdownLabel.isHidden = false
+        } else {
+            breakdownLabel.isHidden = true
+        }
+
         iconView.image = UIImage(systemName: prominent?.encounter.kind.systemImageName ?? "sparkles")
         iconView.tintColor = color
     }
 
     private func setupViews() {
-        [glowView, coreView, countLabel, iconView].forEach {
+        [glowView, coreView, countLabel, breakdownLabel, iconView].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
         }
 
         addSubview(glowView)
         addSubview(coreView)
         addSubview(countLabel)
+        addSubview(breakdownLabel)
         addSubview(iconView)
 
         glowView.layer.cornerRadius = 28
@@ -925,6 +1080,10 @@ final class ExploreClusterAnnotationView: MKAnnotationView {
         countLabel.font = UIFont.systemFont(ofSize: 18, weight: .heavy)
         countLabel.textColor = .white
         countLabel.textAlignment = .center
+        breakdownLabel.font = UIFont.systemFont(ofSize: 8, weight: .bold)
+        breakdownLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        breakdownLabel.textAlignment = .center
+        breakdownLabel.isHidden = true
         iconView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 14, weight: .bold)
         iconView.contentMode = .scaleAspectFit
 
@@ -940,7 +1099,11 @@ final class ExploreClusterAnnotationView: MKAnnotationView {
             coreView.heightAnchor.constraint(equalToConstant: 48),
 
             countLabel.centerXAnchor.constraint(equalTo: coreView.centerXAnchor),
-            countLabel.centerYAnchor.constraint(equalTo: coreView.centerYAnchor, constant: 3),
+            countLabel.centerYAnchor.constraint(equalTo: coreView.centerYAnchor, constant: -1),
+
+            breakdownLabel.centerXAnchor.constraint(equalTo: coreView.centerXAnchor),
+            breakdownLabel.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: -2),
+            breakdownLabel.widthAnchor.constraint(lessThanOrEqualTo: coreView.widthAnchor, constant: -4),
 
             iconView.centerXAnchor.constraint(equalTo: coreView.centerXAnchor),
             iconView.bottomAnchor.constraint(equalTo: coreView.topAnchor, constant: 8),

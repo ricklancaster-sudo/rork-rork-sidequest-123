@@ -2108,7 +2108,8 @@ struct MapExploreView: View {
             northWest: northWest,
             southEast: southEast,
             southWest: southWest,
-            mapRect: mapRect
+            mapRect: mapRect,
+            cameraDistance: visibleRadius * 1.2
         )
     }
 
