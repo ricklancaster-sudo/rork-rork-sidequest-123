@@ -105,6 +105,11 @@ struct MapExploreView: View {
     @State private var hasResolvedViewportEventFeed: Bool = false
     @State private var backgroundPOILoadTasks: [String: Task<Void, Never>] = [:]
     @State private var allCachedPOIs: [MapPOI] = []
+    @State private var emptyPOITileTimestamps: [String: Date] = [:]
+    @State private var poiSearchSemaphoreCount: Int = 0
+    @State private var isInitialPOILoadProtected: Bool = false
+    private static let maxConcurrentPOISearches: Int = 3
+    private static let emptyTileRetryInterval: TimeInterval = 60
 
     private let fallbackCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 34.0900, longitude: -118.3617)
     private var previewCoordinate: CLLocationCoordinate2D? {
@@ -721,9 +726,14 @@ struct MapExploreView: View {
             if let initialCategory = baseRecommendedCategories.first {
                 selectedCategory = initialCategory
             }
+            isInitialPOILoadProtected = true
             scheduleViewportDrivenPOILoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleViewportDrivenEventLoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleMapWorldRefresh()
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                isInitialPOILoadProtected = false
+            }
         }
         .task(id: mapWorldDependencyKey) {
             scheduleMapWorldRefresh()
@@ -1216,7 +1226,21 @@ struct MapExploreView: View {
             applyLoadedPOIs(Array(allCached), center: searchLocation.coordinate)
         }
 
-        let missingDescriptors = descriptors.filter { cachedPOITiles[$0.cacheKey] == nil }
+        let now = Date()
+        let missingDescriptors = descriptors.filter { descriptor in
+            let key = descriptor.cacheKey
+            if let cached = cachedPOITiles[key], !cached.isEmpty {
+                return false
+            }
+            if cachedPOITiles[key] != nil {
+                if let emptyTimestamp = emptyPOITileTimestamps[key],
+                   now.timeIntervalSince(emptyTimestamp) < Self.emptyTileRetryInterval {
+                    return false
+                }
+                cachedPOITiles.removeValue(forKey: key)
+            }
+            return true
+        }
         guard !missingDescriptors.isEmpty else {
             hasCompletedInitialFetch = true
             return
@@ -1226,22 +1250,36 @@ struct MapExploreView: View {
         for descriptor in missingDescriptors {
             let key = descriptor.cacheKey
             guard backgroundPOILoadTasks[key] == nil else { continue }
+            guard poiSearchSemaphoreCount < Self.maxConcurrentPOISearches else { break }
             let bucketSize: Int = hasFocusedCategory && descriptor.category == focusedCategory ? 18 : 10
             let descriptorCenter = descriptor.center
             let descriptorCategory = descriptor.category
             let descriptorRadius = descriptor.searchRadius
+            poiSearchSemaphoreCount += 1
             backgroundPOILoadTasks[key] = Task {
                 let tileLocation = CLLocation(latitude: descriptorCenter.latitude, longitude: descriptorCenter.longitude)
                 let results = await Self.searchPOIsLightweight(for: descriptorCategory, near: tileLocation, radius: descriptorRadius)
                 let trimmed = Array(results.prefix(bucketSize))
+                if trimmed.isEmpty {
+                    emptyPOITileTimestamps[key] = Date()
+                }
                 cachedPOITiles[key] = trimmed
                 backgroundPOILoadTasks.removeValue(forKey: key)
+                poiSearchSemaphoreCount = max(poiSearchSemaphoreCount - 1, 0)
                 let merged = Array(cachedPOITiles.values.flatMap { $0 })
                 allCachedPOIs = merged
                 applyLoadedPOIs(merged, center: searchCenter)
                 hasCompletedInitialFetch = true
+                await drainPendingPOISearches()
             }
         }
+    }
+
+    private func drainPendingPOISearches() async {
+        guard poiSearchSemaphoreCount < Self.maxConcurrentPOISearches else { return }
+        let center = mapCameraCenter ?? centerCoordinate
+        let location = CLLocation(latitude: center.latitude, longitude: center.longitude)
+        await reloadNearbyQuests(near: location, visibleRadius: currentVisibleRadius, viewport: currentViewport)
     }
 
 
@@ -1766,10 +1804,13 @@ struct MapExploreView: View {
             return
         }
         lastViewportPOIRequest = nextRequest
+        if isInitialPOILoadProtected {
+            return
+        }
         pendingViewportPOILoadTask?.cancel()
         pendingViewportPOILoadTask = Task {
             guard !Task.isCancelled else { return }
-            try? await Task.sleep(for: .milliseconds(force ? 0 : 200))
+            try? await Task.sleep(for: .milliseconds(force ? 0 : 300))
             guard !Task.isCancelled else { return }
             let location = CLLocation(latitude: center.latitude, longitude: center.longitude)
             await reloadNearbyQuests(near: location, visibleRadius: visibleRadius, viewport: viewport)
