@@ -56,13 +56,13 @@ Supported markets: LA, NYC, Miami, Las Vegas, Chicago, Austin, Nashville, Dallas
 | `/api/debug/clear-poisoned-reviews` | POST | Clear poisoned/low-rating reviews |
 | `/api/debug/scrape-and-cache` | POST | Scrape a venue's reviews and cache them |
 
-### Metro Tiers & Scheduling
+### Metro Tiers & Scheduling (115 metros as of 2026-04-04)
 
-| Tier | Refresh Interval | Cities |
-|------|-----------------|--------|
-| 1 (top) | 60-90 min | LA, NYC, Miami, Chicago, Las Vegas, Austin, Nashville |
-| 2 (mid) | 120-180 min | Dallas, Houston, Atlanta, SF, Seattle, Denver, Boston |
-| 3 (long-tail) | 240-360 min | Orlando, Tampa, Minneapolis, Charlotte, Detroit |
+| Tier | Refresh Interval | Count | Examples |
+|------|-----------------|-------|----------|
+| 1 (top) | 60-90 min | 8 | LA, NYC, Miami Beach, West Hollywood, Chicago, Las Vegas, Austin, Nashville |
+| 2 (mid) | 120-180 min | 17 | Dallas, Houston, Atlanta, SF, Seattle, Denver, Boston, San Jose, Jacksonville, Miami, San Antonio, Phoenix, Portland, San Diego, Philadelphia, New Orleans, Washington DC |
+| 3 (long-tail) | 240-360 min | 90 | Orlando, Tampa, Minneapolis, Charlotte, Detroit + 85 more US metros >100k pop |
 
 ### Discovery Intents
 
@@ -247,12 +247,21 @@ These are in `ExternalEventServiceConfiguration.sideQuestPrototype()` and used a
 
 ---
 
-## 6. Current Status (as of 2026-03-30)
+## 6. Current Status (as of 2026-04-04)
 
 - **Fly.io worker**: Running, healthy, actively processing jobs
-- **38 metros** configured and enabled
-- **176 completed jobs**, 23 pending, 1 claimed (actively processing)
-- **Average job duration**: ~15 seconds
-- **Average events per run**: ~115
-- Nightlife venues discovered per run: 1-22 depending on market (Las Vegas highest at 22, Nashville lowest at 1)
+- **115 metros** configured and enabled (expanded from 38 on 2026-04-04)
+- **460 jobs** enqueued for full nationwide backfill
+- **266+ viewport tiles** in `external_event_viewport_tiles` (growing as backfill processes)
+- **Average job duration**: ~12-14 seconds
+- **Average events per run**: ~1800+
+- **Confirmed scraper sources writing to tiles**: Ticketmaster, Discotech, Clubbable
+- **4 intents actively producing tiles**: nearby_and_worth_it (147), biggest_tonight (51), exclusive_hot (35), last_minute_plans (33)
+- Nightlife venues discovered per run: 1-22 depending on market (Las Vegas highest at 22)
 - Review coverage: 48-77% depending on market density
+
+### Nationwide Cron Architecture
+
+- **iOS `CronSweepService`**: Tier-based backfill triggers — calls `/api/trigger-backfill` with tier cooldowns (T1: 1h, T2: 2h, T3: 4h)
+- **Fly.io worker internal scheduler**: `enqueue_scheduled_refreshes()` RPC auto-enqueues jobs based on `ingestion_metros.refresh_interval_minutes`
+- **Manual backfill**: `curl -X POST .../api/trigger-backfill -d '{"tier":3}'` enqueues all 115 metros (460 jobs across 4 intents)
