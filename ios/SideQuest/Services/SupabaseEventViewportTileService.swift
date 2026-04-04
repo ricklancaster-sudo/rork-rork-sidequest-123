@@ -106,7 +106,7 @@ actor SupabaseEventViewportTileService {
             URLQueryItem(name: "x", value: "lte.\(range.maxX)"),
             URLQueryItem(name: "y", value: "gte.\(range.minY)"),
             URLQueryItem(name: "y", value: "lte.\(range.maxY)"),
-            URLQueryItem(name: "expires_at", value: "gte.\(Self.postgrestTimestamp(from: Date()))"),
+            URLQueryItem(name: "expires_at", value: "gte.\(Self.postgrestTimestamp(from: Date().addingTimeInterval(-Self.staleDisplayWindow)))"),
             URLQueryItem(name: "order", value: "y.asc,x.asc"),
             URLQueryItem(name: "limit", value: "\(range.tileCount)")
         ]
@@ -306,6 +306,13 @@ actor SupabaseEventViewportTileService {
         }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: string)
+    }
+
+    static let staleDisplayWindow: TimeInterval = 72 * 60 * 60
+
+    nonisolated static func isTileStale(_ tile: ExternalEventViewportTileSnapshot) -> Bool {
+        guard let expiresAt = tile.expiresAt else { return true }
+        return expiresAt < Date()
     }
 
     nonisolated private static func postgrestTimestamp(from date: Date) -> String {

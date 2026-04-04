@@ -1,6 +1,23 @@
 import Foundation
 import MapKit
 
+nonisolated enum EventTimePriority: String, Sendable {
+    case live
+    case imminent
+    case soon
+    case today
+    case later
+    case none
+
+    var isAnimated: Bool {
+        self == .live || self == .imminent
+    }
+
+    var forceFullPin: Bool {
+        self == .live || self == .imminent || self == .soon
+    }
+}
+
 nonisolated enum ExploreEncounterKind: String, Identifiable, Sendable {
     case activeQuest = "Active Quest"
     case mainQuest = "Main Quest"
@@ -69,6 +86,7 @@ nonisolated struct ExploreEncounter: Identifiable, Sendable {
     let groupedEvents: [ExternalEvent]
     let mapPinAssetName: String?
     let countdownText: String?
+    let eventTimePriority: EventTimePriority
 
     init(
         id: String,
@@ -87,7 +105,8 @@ nonisolated struct ExploreEncounter: Identifiable, Sendable {
         externalEvent: ExternalEvent? = nil,
         groupedEvents: [ExternalEvent] = [],
         mapPinAssetName: String? = nil,
-        countdownText: String? = nil
+        countdownText: String? = nil,
+        eventTimePriority: EventTimePriority = .none
     ) {
         self.id = id
         self.poi = poi
@@ -106,6 +125,7 @@ nonisolated struct ExploreEncounter: Identifiable, Sendable {
         self.groupedEvents = groupedEvents
         self.mapPinAssetName = mapPinAssetName
         self.countdownText = countdownText
+        self.eventTimePriority = eventTimePriority
     }
 
     var coordinate: CLLocationCoordinate2D { poi.coordinate }

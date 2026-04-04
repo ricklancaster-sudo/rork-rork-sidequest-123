@@ -109,6 +109,7 @@ struct MapExploreView: View {
     @State private var poiSearchSemaphoreCount: Int = 0
     @State private var isInitialPOILoadProtected: Bool = false
     @State private var supabasePOITileCache: [String: [MapPOI]] = [:]
+    @State private var supabasePOITileFetchDates: [String: Date] = [:]
     @State private var pendingSupabasePOILoadTask: Task<Void, Never>?
     @State private var lastSupabasePOITileSignature: String = ""
     @State private var hasResolvedSupabasePOIFeed: Bool = false
@@ -416,6 +417,7 @@ struct MapExploreView: View {
             )
 
             let countdownLabel = group.count > 1 ? "\(group.count)" : timing.primaryLabel
+            let timePriority = computeEventTimePriority(for: primaryEvent)
 
             encounters.append(ExploreEncounter(
                 id: "encounter_event_\(primaryEvent.id)",
@@ -434,7 +436,8 @@ struct MapExploreView: View {
                 externalEvent: primaryEvent,
                 groupedEvents: group.count > 1 ? group : [],
                 mapPinAssetName: primaryEvent.mapPinAssetName,
-                countdownText: countdownLabel
+                countdownText: countdownLabel,
+                eventTimePriority: timePriority
             ))
         }
         return encounters
@@ -1618,22 +1621,49 @@ struct MapExploreView: View {
             }
         }()
 
-        guard !missingIntents.isEmpty || !wideMissingIntents.isEmpty else {
+        let staleIntents = request.intents.filter { intent in
+            requestTileCacheKeys(for: request, intent: intent).contains { key in
+                guard let tiles = viewportEventTileCache[key] else { return false }
+                return tiles.contains(where: { SupabaseEventViewportTileService.isTileStale($0) })
+            }
+        }
+        let wideStaleIntents: [ExternalDiscoveryIntent] = {
+            guard let wideRequest else { return [] }
+            return wideRequest.intents.filter { intent in
+                requestTileCacheKeys(for: wideRequest, intent: intent).contains { key in
+                    guard let tiles = viewportEventTileCache[key] else { return false }
+                    return tiles.contains(where: { SupabaseEventViewportTileService.isTileStale($0) })
+                }
+            }
+        }()
+
+        let needsFetch = !missingIntents.isEmpty || !wideMissingIntents.isEmpty
+        let needsStaleRefresh = !staleIntents.isEmpty || !wideStaleIntents.isEmpty
+
+        guard needsFetch || needsStaleRefresh else {
             viewportExternalEvents = cachedEvents
             hasResolvedViewportEventFeed = true
             return
+        }
+
+        if !needsFetch && needsStaleRefresh {
+            viewportExternalEvents = cachedEvents
+            hasResolvedViewportEventFeed = true
         }
 
         pendingViewportEventLoadTask?.cancel()
         pendingViewportEventLoadTask = Task {
             guard !Task.isCancelled else { return }
 
+            let allDetailedIntents = Array(Set(missingIntents + staleIntents))
+            let allWideIntents = Array(Set(wideMissingIntents + wideStaleIntents))
+
             let service = SupabaseEventViewportTileService.shared
             let loadedBundles = await withTaskGroup(
                 of: ExternalEventViewportTileBundle?.self,
                 returning: [ExternalEventViewportTileBundle].self
             ) { group in
-                for intent in missingIntents {
+                for intent in allDetailedIntents {
                     group.addTask {
                         await service.loadBundle(
                             intent: intent,
@@ -1644,7 +1674,7 @@ struct MapExploreView: View {
                     }
                 }
                 if let wideRequest {
-                    for intent in wideMissingIntents {
+                    for intent in allWideIntents {
                         group.addTask {
                             await service.loadBundle(
                                 intent: intent,
@@ -1912,16 +1942,43 @@ struct MapExploreView: View {
             mergeSupabasePOIs(cachedPOIs)
         }
 
+        let poiStaleTTL: TimeInterval = 24 * 60 * 60
+        let now = Date()
+
         let hasMissing = supabasePOITileCacheKeys(for: resolvedRange, countryCode: countryCode)
             .contains { supabasePOITileCache[$0] == nil }
         let hasWideMissing = wideRange.map {
             supabasePOITileCacheKeys(for: $0, countryCode: countryCode)
                 .contains { supabasePOITileCache[$0] == nil }
         } ?? false
-        guard hasMissing || hasWideMissing else {
+
+        let hasStale = supabasePOITileCacheKeys(for: resolvedRange, countryCode: countryCode)
+            .contains { key in
+                guard supabasePOITileCache[key] != nil,
+                      let fetched = supabasePOITileFetchDates[key] else { return false }
+                return now.timeIntervalSince(fetched) > poiStaleTTL
+            }
+        let hasWideStale = wideRange.map {
+            supabasePOITileCacheKeys(for: $0, countryCode: countryCode)
+                .contains { key in
+                    guard supabasePOITileCache[key] != nil,
+                          let fetched = supabasePOITileFetchDates[key] else { return false }
+                    return now.timeIntervalSince(fetched) > poiStaleTTL
+                }
+        } ?? false
+
+        let needsFetch = hasMissing || hasWideMissing
+        let needsStaleRefresh = hasStale || hasWideStale
+
+        guard needsFetch || needsStaleRefresh else {
             mergeSupabasePOIs(cachedPOIs)
             hasResolvedSupabasePOIFeed = true
             return
+        }
+
+        if !needsFetch && needsStaleRefresh {
+            mergeSupabasePOIs(cachedPOIs)
+            hasResolvedSupabasePOIFeed = true
         }
 
         pendingSupabasePOILoadTask?.cancel()
@@ -1929,23 +1986,25 @@ struct MapExploreView: View {
             guard !Task.isCancelled else { return }
             let service = SupabasePOIViewportTileService.shared
 
-            let detailedBundle = hasMissing ? await service.loadTiles(range: resolvedRange, countryCode: countryCode) : nil
-            let wideBundle: POIViewportTileBundle? = {
-                guard hasWideMissing, let wr = wideRange else { return nil }
-                return nil
-            }()
-            let wideBundleResult: POIViewportTileBundle? = hasWideMissing && wideRange != nil
+            let shouldFetchDetailed = hasMissing || hasStale
+            let shouldFetchWide = hasWideMissing || hasWideStale
+
+            let detailedBundle = shouldFetchDetailed ? await service.loadTiles(range: resolvedRange, countryCode: countryCode) : nil
+            let wideBundleResult: POIViewportTileBundle? = shouldFetchWide && wideRange != nil
                 ? await service.loadTiles(range: wideRange!, countryCode: countryCode)
-                : wideBundle
+                : nil
             guard !Task.isCancelled else { return }
 
             var updatedCache = supabasePOITileCache
+            var updatedFetchDates = supabasePOITileFetchDates
+            let fetchDate = Date()
 
             for bundle in [detailedBundle, wideBundleResult].compactMap({ $0 }) {
                 for tile in bundle.tiles {
                     let cacheKey = supabasePOITileCacheKeyFor(tile.tile)
                     let mapPOIs = tile.pois.compactMap(convertTilePOIToMapPOI)
                     updatedCache[cacheKey] = mapPOIs
+                    updatedFetchDates[cacheKey] = fetchDate
                 }
 
                 let r = bundle.range
@@ -1956,11 +2015,15 @@ struct MapExploreView: View {
                         if updatedCache[key] == nil {
                             updatedCache[key] = []
                         }
+                        if updatedFetchDates[key] == nil {
+                            updatedFetchDates[key] = fetchDate
+                        }
                     }
                 }
             }
 
             supabasePOITileCache = updatedCache
+            supabasePOITileFetchDates = updatedFetchDates
 
             let allPOIs = aggregatedAllSupabasePOIs()
             mergeSupabasePOIs(allPOIs)
@@ -2393,6 +2456,23 @@ struct MapExploreView: View {
         if delta <= 6 * 3600 { return 1 }
         if delta <= 24 * 3600 { return 2 }
         return 3
+    }
+
+    private func computeEventTimePriority(for event: ExternalEvent) -> EventTimePriority {
+        guard let startAtUTC = event.startAtUTC else { return .later }
+        let now = eventCountdownNow
+        if startAtUTC <= now {
+            if let endAtUTC = event.endAtUTC, endAtUTC > now {
+                return .live
+            }
+            let elapsedMinutes = now.timeIntervalSince(startAtUTC) / 60
+            return elapsedMinutes < 120 ? .live : .later
+        }
+        let delta = startAtUTC.timeIntervalSince(now)
+        if delta <= 2 * 3600 { return .imminent }
+        if delta <= 6 * 3600 { return .soon }
+        if delta <= 24 * 3600 { return .today }
+        return .later
     }
 
     private func logExternalEventDiagnosticsIfNeeded(signature: String) {

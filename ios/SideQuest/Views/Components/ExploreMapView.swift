@@ -724,10 +724,16 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
     func configure(with encounter: ExploreEncounter, zoomTier: MapZoomTier = .street, animationsEnabled: Bool = true) {
         let category = encounter.poi.category
         let color = category.uiColor
-        let isHigh = encounter.kind.isHighPriority
+        let timePriority = encounter.eventTimePriority
+        let isHigh = encounter.kind.isHighPriority || timePriority.forceFullPin
         let isVisited = encounter.kind == .visitedShrine
-        let useCompactMode = zoomTier != .street && !isHigh
+        let useCompactMode = zoomTier != .street && !isHigh && !timePriority.forceFullPin
         currentZoomTier = zoomTier
+
+        if timePriority == .later && encounter.kind == .limitedEvent {
+            configureCompactDot(category: category, color: color, encounter: encounter, isVisited: false)
+            return
+        }
 
         if useCompactMode {
             configureCompactDot(category: category, color: color, encounter: encounter, isVisited: isVisited)
@@ -764,8 +770,15 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
         iconBadge.isHidden = false
         iconBadge.backgroundColor = isVisited ? UIColor(white: 0.4, alpha: 0.9) : color.withAlphaComponent(0.92)
         iconBadge.layer.borderColor = UIColor.white.withAlphaComponent(isHigh ? 0.95 : 0.6).cgColor
-        if let countdownText = encounter.countdownText, !countdownText.isEmpty {
-            iconImageView.image = UIImage(systemName: "clock.fill")
+        if timePriority == .live {
+            iconImageView.image = UIImage(systemName: "bolt.fill")
+            iconLabel.text = "LIVE"
+            iconLabel.isHidden = false
+            iconBadge.backgroundColor = UIColor.systemRed.withAlphaComponent(0.95)
+            iconBadgeWidthConstraint?.constant = 52
+            iconBadge.layer.cornerRadius = 11
+        } else if let countdownText = encounter.countdownText, !countdownText.isEmpty {
+            iconImageView.image = UIImage(systemName: timePriority == .imminent ? "flame.fill" : "clock.fill")
             iconLabel.text = countdownText
             iconLabel.isHidden = false
             iconBadgeWidthConstraint?.constant = max(44, min(74, countdownText.size(withAttributes: [.font: iconLabel.font as Any]).width + 26))
@@ -777,17 +790,20 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
             iconBadge.layer.cornerRadius = 12
         }
 
-        glowRing.isHidden = !isHigh
-        glowRing.backgroundColor = color.withAlphaComponent(0.16)
-        glowRing.layer.borderColor = color.withAlphaComponent(0.55).cgColor
+        let isLiveOrImminent = timePriority == .live || timePriority == .imminent
+        let glowColor = isLiveOrImminent ? UIColor.systemRed : color
+
+        glowRing.isHidden = !isHigh && !isLiveOrImminent
+        glowRing.backgroundColor = glowColor.withAlphaComponent(isLiveOrImminent ? 0.22 : 0.16)
+        glowRing.layer.borderColor = glowColor.withAlphaComponent(isLiveOrImminent ? 0.7 : 0.55).cgColor
 
         auraRing.isHidden = isVisited
-        auraRing.backgroundColor = color.withAlphaComponent(isHigh ? 0.2 : 0.1)
-        auraRing.layer.borderColor = color.withAlphaComponent(isHigh ? 0.42 : 0.24).cgColor
+        auraRing.backgroundColor = glowColor.withAlphaComponent(isLiveOrImminent ? 0.25 : (isHigh ? 0.2 : 0.1))
+        auraRing.layer.borderColor = glowColor.withAlphaComponent(isLiveOrImminent ? 0.55 : (isHigh ? 0.42 : 0.24)).cgColor
 
-        layer.shadowColor = color.cgColor
-        layer.shadowRadius = isHigh ? 18 : 10
-        layer.shadowOpacity = isHigh ? 0.42 : 0.22
+        layer.shadowColor = glowColor.cgColor
+        layer.shadowRadius = isLiveOrImminent ? 22 : (isHigh ? 18 : 10)
+        layer.shadowOpacity = isLiveOrImminent ? 0.55 : (isHigh ? 0.42 : 0.22)
         layer.shadowOffset = CGSize(width: 0, height: 8)
 
         if isVisited {
@@ -799,7 +815,10 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
             buildingImageView.transform = .identity
         }
 
-        if encounter.kind.isClusterable {
+        if timePriority.forceFullPin || !encounter.kind.isClusterable {
+            clusteringIdentifier = nil
+            displayPriority = .required
+        } else if encounter.kind.isClusterable {
             clusteringIdentifier = "encounter_cluster"
             displayPriority = isHigh ? .required : .defaultHigh
         } else {
@@ -807,7 +826,9 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
             displayPriority = .required
         }
 
-        if animationsEnabled {
+        if animationsEnabled && timePriority.isAnimated {
+            animateLiveEvent(color: glowColor)
+        } else if animationsEnabled {
             animateStructure(highPriority: isHigh)
         } else {
             stripAnimations()
@@ -948,6 +969,58 @@ final class ExploreEncounterAnnotationView: MKAnnotationView {
             glowRing.widthAnchor.constraint(equalToConstant: 36),
             glowRing.heightAnchor.constraint(equalToConstant: 36)
         ])
+    }
+
+    private func animateLiveEvent(color: UIColor) {
+        buildingImageView.layer.removeAllAnimations()
+        glowRing.layer.removeAllAnimations()
+        auraRing.layer.removeAllAnimations()
+        iconBadge.layer.removeAllAnimations()
+
+        let bounce = CABasicAnimation(keyPath: "transform.translation.y")
+        bounce.fromValue = 0
+        bounce.toValue = -4
+        bounce.duration = 0.8
+        bounce.repeatCount = .infinity
+        bounce.autoreverses = true
+        bounce.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        buildingImageView.layer.add(bounce, forKey: "liveBounce")
+
+        let auraPulse = CABasicAnimation(keyPath: "transform.scale")
+        auraPulse.fromValue = 0.85
+        auraPulse.toValue = 1.2
+        auraPulse.duration = 1.2
+        auraPulse.repeatCount = .infinity
+        auraPulse.autoreverses = true
+        auraPulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        auraRing.layer.add(auraPulse, forKey: "liveAuraPulse")
+
+        let auraFade = CABasicAnimation(keyPath: "opacity")
+        auraFade.fromValue = 0.3
+        auraFade.toValue = 0.9
+        auraFade.duration = 1.0
+        auraFade.repeatCount = .infinity
+        auraFade.autoreverses = true
+        auraFade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        auraRing.layer.add(auraFade, forKey: "liveAuraFade")
+
+        let glowPulse = CABasicAnimation(keyPath: "transform.scale")
+        glowPulse.fromValue = 0.8
+        glowPulse.toValue = 1.25
+        glowPulse.duration = 1.0
+        glowPulse.repeatCount = .infinity
+        glowPulse.autoreverses = true
+        glowPulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        glowRing.layer.add(glowPulse, forKey: "liveGlowPulse")
+
+        let badgePulse = CABasicAnimation(keyPath: "transform.scale")
+        badgePulse.fromValue = 1.0
+        badgePulse.toValue = 1.18
+        badgePulse.duration = 0.7
+        badgePulse.repeatCount = .infinity
+        badgePulse.autoreverses = true
+        badgePulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        iconBadge.layer.add(badgePulse, forKey: "liveBadgePulse")
     }
 
     private func animateStructure(highPriority: Bool) {
