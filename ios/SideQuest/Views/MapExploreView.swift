@@ -94,6 +94,7 @@ struct MapExploreView: View {
     @State private var currentVisibleRadius: Double = 2000
     @State private var mapCameraCenter: CLLocationCoordinate2D?
     @State private var currentViewport: ExploreMapViewport?
+    @State private var currentCameraDistance: Double = 1800
     @State private var groupedEventsSheet: [ExternalEvent]?
     @State private var cachedPOITiles: [String: [MapPOI]] = [:]
     @State private var pendingViewportPOILoadTask: Task<Void, Never>?
@@ -589,42 +590,12 @@ struct MapExploreView: View {
     }
 
     private var mapWorldDependencyKey: String {
-        let poiKey = mixedPOIs
-            .map {
-                let latitude = String(format: "%.4f", $0.coordinate.latitude)
-                let longitude = String(format: "%.4f", $0.coordinate.longitude)
-                return "\($0.id):\($0.category.rawValue):\(latitude):\(longitude)"
-            }
-            .joined(separator: ",")
-        let activeMapQuestKey = activeMapQuests
-            .map { "\($0.poi.id):\($0.isCheckedIn ? 1 : 0):\($0.isCompleted ? 1 : 0)" }
-            .sorted()
-            .joined(separator: ",")
-        let visitedKey = appState.visitedPOIs
-            .map(\.id)
-            .sorted()
-            .joined(separator: ",")
-        let eventKey = activeMapEventFeed
-            .map { event in
-                let start = event.startAtUTC?.timeIntervalSince1970 ?? -1
-                return "\(event.id):\(start):\(event.latitude ?? 0):\(event.longitude ?? 0)"
-            }
-            .sorted()
-            .joined(separator: ",")
-        let cameraCenter = mapCameraCenter ?? centerCoordinate
-        let locationKey = "\(String(format: "%.4f", cameraCenter.latitude)):\(String(format: "%.4f", cameraCenter.longitude))"
+        let poiIDHash = mixedPOIs.reduce(0) { $0 &+ $1.id.hashValue }
+        let eventIDHash = activeMapEventFeed.reduce(0) { $0 &+ $1.id.hashValue }
+        let activeCount = activeMapQuests.filter(\.isCompleted).count
+        let visitedCount = appState.visitedPOIs.count
         let countdownBucket = Int(eventCountdownNow.timeIntervalSince1970 / 30)
-        return [
-            poiKey,
-            activeMapQuestKey,
-            visitedKey,
-            eventKey,
-            locationKey,
-            selectedCategory.rawValue,
-            hasExplicitCategoryFocus ? "1" : "0",
-            String(Int(poiService.searchRadiusMeters)),
-            String(countdownBucket)
-        ].joined(separator: "|")
+        return "\(mixedPOIs.count)_\(poiIDHash)_\(activeMapEventFeed.count)_\(eventIDHash)_\(activeMapQuests.count)_\(activeCount)_\(visitedCount)_\(selectedCategory.rawValue)_\(hasExplicitCategoryFocus ? 1 : 0)_\(countdownBucket)"
     }
 
     private func buildMapWorldSnapshot() -> MapWorldSnapshot {
@@ -752,6 +723,9 @@ struct MapExploreView: View {
             }
         }
         .task(id: mapWorldDependencyKey) {
+            guard hasLoadedInitialWorld else { return }
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
             scheduleMapWorldRefresh()
         }
         .onChange(of: poiService.userLocation) { _, newValue in
@@ -838,9 +812,25 @@ struct MapExploreView: View {
         .library, .bookstore, .museum, .artGallery, .communityCenter, .placeOfWorship, .volunteerCenter
     ]
 
+    private func applyZoomContentFilter(_ encounters: [ExploreEncounter]) -> [ExploreEncounter] {
+        if currentVisibleRadius > 500_000 {
+            return Array(encounters.filter {
+                $0.kind == .limitedEvent && $0.eventTimePriority.forceFullPin
+            }.prefix(40))
+        } else if currentVisibleRadius > 100_000 {
+            return Array(encounters.filter { $0.kind == .limitedEvent }.prefix(60))
+        } else if currentVisibleRadius > 20_000 {
+            let events = encounters.filter { $0.kind == .limitedEvent }
+            let activePOIs = encounters.filter { $0.kind == .activeQuest || $0.kind == .mainQuest }
+            return Array((events + activePOIs).prefix(80))
+        }
+        return encounters
+    }
+
     private var filteredEncounterList: [ExploreEncounter] {
-        guard selectedMapFilter != .all else { return encounterList }
-        return encounterList.filter { encounter in
+        let zoomFiltered = applyZoomContentFilter(encounterList)
+        guard selectedMapFilter != .all else { return zoomFiltered }
+        return zoomFiltered.filter { encounter in
             switch selectedMapFilter {
             case .all:
                 return true
@@ -1551,6 +1541,7 @@ struct MapExploreView: View {
         currentVisibleRadius = viewport.visibleRadius
         mapCameraCenter = viewport.center
         currentViewport = viewport
+        currentCameraDistance = viewport.cameraDistance
         scheduleViewportDrivenEventLoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
         scheduleViewportDrivenSupabasePOILoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
         scheduleViewportDrivenPOILoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
@@ -2137,6 +2128,7 @@ struct MapExploreView: View {
         visibleRadius: Double,
         force: Bool = false
     ) {
+        guard visibleRadius <= 50_000 else { return }
         let viewport = currentViewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
         let nextRequest = ViewportPOIRequest(
             center: center,

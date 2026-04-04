@@ -122,6 +122,14 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
         guard !hasConfiguredInitialCamera else { return }
         hasConfiguredInitialCamera = true
         self.mapViewRef = mapView
+
+        let usBounds = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 37.0, longitude: -96.0),
+            span: MKCoordinateSpan(latitudeDelta: 40, longitudeDelta: 100)
+        )
+        mapView.cameraBoundary = MKMapView.CameraBoundary(coordinateRegion: usBounds)
+        mapView.cameraZoomRange = MKMapView.CameraZoomRange(maxCenterCoordinateDistance: 6_000_000)
+
         let camera = MKMapCamera(
             lookingAtCenter: center,
             fromDistance: 1800,
@@ -337,7 +345,7 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
         case .zoomOut:
             let updatedCamera = MKMapCamera(
                 lookingAtCenter: camera.centerCoordinate,
-                fromDistance: min(camera.centerCoordinateDistance * 1.9, 6_000_000),
+                fromDistance: min(camera.centerCoordinateDistance * 1.9, 4_000_000),
                 pitch: max(55 - (camera.centerCoordinateDistance / 30_000) * 6, 0),
                 heading: 0
             )
