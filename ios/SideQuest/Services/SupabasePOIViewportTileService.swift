@@ -130,7 +130,14 @@ actor SupabasePOIViewportTileService {
 
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
 
-        let url = projectURL.appendingPathComponent("rest/v1/\(poiTileTable)")
+        var components = URLComponents(
+            url: projectURL.appendingPathComponent("rest/v1/\(poiTileTable)"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "on_conflict", value: "country_code,z,x,y")
+        ]
+        guard let url = components?.url else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = data
@@ -138,7 +145,6 @@ actor SupabasePOIViewportTileService {
         request.setValue(configuration.schema, forHTTPHeaderField: "Content-Profile")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("resolution=merge-duplicates", forHTTPHeaderField: "Prefer")
-        request.setValue("on_conflict=country_code,z,x,y", forHTTPHeaderField: "Prefer")
         return request
     }
 
