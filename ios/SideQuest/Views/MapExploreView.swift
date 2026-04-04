@@ -1172,8 +1172,8 @@ struct MapExploreView: View {
 
 
     private static let minimumVisibleRadiusForPOIs: Double = 2_000
-    private static let maximumPOISearchRadius: Double = 35_000
-    private static let maximumVisiblePOIs: Int = 220
+    private static let maximumPOISearchRadius: Double = 80_000
+    private static let maximumVisiblePOIs: Int = 400
 
     private func reloadNearbyQuests(
         near location: CLLocation? = nil,
@@ -1494,13 +1494,7 @@ struct MapExploreView: View {
         mapCameraCenter = viewport.center
         currentViewport = viewport
         scheduleViewportDrivenEventLoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
-        reapplyVisiblePOIs(center: viewport.center)
         scheduleViewportDrivenPOILoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
-    }
-
-    private func reapplyVisiblePOIs(center: CLLocationCoordinate2D) {
-        guard !allCachedPOIs.isEmpty else { return }
-        applyLoadedPOIs(allCachedPOIs, center: center)
     }
 
     private func openInMaps(poi: MapPOI) {
@@ -1775,6 +1769,8 @@ struct MapExploreView: View {
         pendingViewportPOILoadTask?.cancel()
         pendingViewportPOILoadTask = Task {
             guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: .milliseconds(force ? 0 : 200))
+            guard !Task.isCancelled else { return }
             let location = CLLocation(latitude: center.latitude, longitude: center.longitude)
             await reloadNearbyQuests(near: location, visibleRadius: visibleRadius, viewport: viewport)
         }
@@ -1819,45 +1815,37 @@ struct MapExploreView: View {
         center: CLLocationCoordinate2D,
         visibleRadius: Double
     ) -> [CLLocationCoordinate2D] {
-        guard let viewport else {
-            let fallback = fallbackViewport(center: center, visibleRadius: visibleRadius)
-            return [
-                fallback.center,
-                fallback.northEast,
-                fallback.northWest,
-                fallback.southEast,
-                fallback.southWest
-            ]
+        let vp = viewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
+
+        let north = max(vp.northEast.latitude, vp.northWest.latitude)
+        let south = min(vp.southEast.latitude, vp.southWest.latitude)
+        let east = max(vp.northEast.longitude, vp.southEast.longitude)
+        let west = min(vp.northWest.longitude, vp.southWest.longitude)
+
+        let latSpan = north - south
+        let lonSpan = east - west
+
+        let gridSize: Int
+        if visibleRadius > 200_000 {
+            gridSize = 5
+        } else if visibleRadius > 50_000 {
+            gridSize = 4
+        } else {
+            gridSize = 3
         }
 
-        let northMid = CLLocationCoordinate2D(
-            latitude: (viewport.northEast.latitude + viewport.northWest.latitude) / 2,
-            longitude: (viewport.northEast.longitude + viewport.northWest.longitude) / 2
-        )
-        let southMid = CLLocationCoordinate2D(
-            latitude: (viewport.southEast.latitude + viewport.southWest.latitude) / 2,
-            longitude: (viewport.southEast.longitude + viewport.southWest.longitude) / 2
-        )
-        let eastMid = CLLocationCoordinate2D(
-            latitude: (viewport.northEast.latitude + viewport.southEast.latitude) / 2,
-            longitude: (viewport.northEast.longitude + viewport.southEast.longitude) / 2
-        )
-        let westMid = CLLocationCoordinate2D(
-            latitude: (viewport.northWest.latitude + viewport.southWest.latitude) / 2,
-            longitude: (viewport.northWest.longitude + viewport.southWest.longitude) / 2
-        )
-
-        return [
-            viewport.center,
-            viewport.northEast,
-            viewport.northWest,
-            viewport.southEast,
-            viewport.southWest,
-            northMid,
-            southMid,
-            eastMid,
-            westMid
-        ]
+        var anchors: [CLLocationCoordinate2D] = []
+        for row in 0 ..< gridSize {
+            for col in 0 ..< gridSize {
+                let latFraction = (Double(row) + 0.5) / Double(gridSize)
+                let lonFraction = (Double(col) + 0.5) / Double(gridSize)
+                anchors.append(CLLocationCoordinate2D(
+                    latitude: south + latSpan * latFraction,
+                    longitude: west + lonSpan * lonFraction
+                ))
+            }
+        }
+        return anchors
     }
 
     private func fallbackViewport(center: CLLocationCoordinate2D, visibleRadius: Double) -> ExploreMapViewport {

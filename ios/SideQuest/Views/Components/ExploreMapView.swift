@@ -91,6 +91,8 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
     private var encounterAnnotationsByID: [String: ExploreEncounterAnnotation] = [:]
     private var districtAnnotationsByID: [String: ExploreDistrictLabelAnnotation] = [:]
     weak var mapViewRef: MKMapView?
+    private var regionChangeDebounceTimer: Timer?
+    private var lastThrottledViewportTime: CFAbsoluteTime = 0
 
     init(parent: ExploreMapView) {
         self.parent = parent
@@ -446,13 +448,21 @@ final class ExploreMapCoordinator: NSObject, MKMapViewDelegate {
 
     nonisolated func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
         MainActor.assumeIsolated {
-            let viewport = buildViewport(from: mapView)
-            parent.onRegionChanged(viewport)
+            regionChangeDebounceTimer?.invalidate()
+            regionChangeDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let viewport = self.buildViewport(from: mapView)
+                    self.parent.onRegionChanged(viewport)
+                }
+            }
         }
     }
 
     nonisolated func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
         MainActor.assumeIsolated {
+            regionChangeDebounceTimer?.invalidate()
+            regionChangeDebounceTimer = nil
             let viewport = buildViewport(from: mapView)
             parent.onRegionChanged(viewport)
 
