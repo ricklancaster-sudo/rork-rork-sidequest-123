@@ -108,8 +108,13 @@ struct MapExploreView: View {
     @State private var emptyPOITileTimestamps: [String: Date] = [:]
     @State private var poiSearchSemaphoreCount: Int = 0
     @State private var isInitialPOILoadProtected: Bool = false
+    @State private var supabasePOITileCache: [String: [MapPOI]] = [:]
+    @State private var pendingSupabasePOILoadTask: Task<Void, Never>?
+    @State private var lastSupabasePOITileSignature: String = ""
+    @State private var hasResolvedSupabasePOIFeed: Bool = false
     private static let maxConcurrentPOISearches: Int = 3
     private static let emptyTileRetryInterval: TimeInterval = 60
+    private static let poiTileZoom: Int = 12
 
     private let fallbackCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 34.0900, longitude: -118.3617)
     private var previewCoordinate: CLLocationCoordinate2D? {
@@ -193,6 +198,10 @@ struct MapExploreView: View {
         SupabaseEventViewportTileService.shared.isConfigured
     }
 
+    private var isSupabasePOITileFeedEnabled: Bool {
+        SupabasePOIViewportTileService.shared.isConfigured
+    }
+
     private var fallbackMapEvents: [ExternalEvent] {
         appState.externalEventFeed + appState.eventsTabExternalEventFeed + appState.exclusiveExternalEventFeed
     }
@@ -215,7 +224,7 @@ struct MapExploreView: View {
 
     private func buildEncounterList(normalizedMapEvents: [ExternalEvent]) -> [ExploreEncounter] {
         let activeIDs: Set<String> = Set(activeMapQuests.map { $0.poi.id })
-        let currentPOIs: [MapPOI] = Array(mixedPOIs.prefix(16))
+        let currentPOIs: [MapPOI] = Array(mixedPOIs)
         let verifiedQuests = appState.allQuests.filter { $0.type == .verified && $0.isLocationDependent }
 
         var encounters: [ExploreEncounter] = []
@@ -727,6 +736,7 @@ struct MapExploreView: View {
                 selectedCategory = initialCategory
             }
             isInitialPOILoadProtected = true
+            scheduleViewportDrivenSupabasePOILoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleViewportDrivenPOILoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleViewportDrivenEventLoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleMapWorldRefresh()
@@ -800,6 +810,7 @@ struct MapExploreView: View {
         .onDisappear {
             pendingViewportPOILoadTask?.cancel()
             pendingViewportEventLoadTask?.cancel()
+            pendingSupabasePOILoadTask?.cancel()
         }
         .onChange(of: externalEventDiagnosticsSignature) { _, signature in
             logExternalEventDiagnosticsIfNeeded(signature: signature)
@@ -1270,6 +1281,9 @@ struct MapExploreView: View {
                 allCachedPOIs = merged
                 applyLoadedPOIs(merged, center: searchCenter)
                 hasCompletedInitialFetch = true
+                if !trimmed.isEmpty {
+                    seedPOITilesToSupabase(pois: trimmed, center: descriptorCenter)
+                }
                 await drainPendingPOISearches()
             }
         }
@@ -1532,6 +1546,7 @@ struct MapExploreView: View {
         mapCameraCenter = viewport.center
         currentViewport = viewport
         scheduleViewportDrivenEventLoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
+        scheduleViewportDrivenSupabasePOILoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
         scheduleViewportDrivenPOILoad(center: viewport.center, visibleRadius: viewport.visibleRadius)
     }
 
@@ -1784,6 +1799,190 @@ struct MapExploreView: View {
             && coordinate.latitude <= north + latitudePadding
             && coordinate.longitude >= west - longitudePadding
             && coordinate.longitude <= east + longitudePadding
+    }
+
+    private func scheduleViewportDrivenSupabasePOILoad(
+        center: CLLocationCoordinate2D,
+        visibleRadius: Double,
+        force: Bool = false
+    ) {
+        guard isSupabasePOITileFeedEnabled else { return }
+
+        let viewport = currentViewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
+        let bounds = ExternalEventViewportBounds(
+            northLatitude: max(viewport.northEast.latitude, viewport.northWest.latitude),
+            southLatitude: min(viewport.southEast.latitude, viewport.southWest.latitude),
+            eastLongitude: max(viewport.northEast.longitude, viewport.southEast.longitude),
+            westLongitude: min(viewport.northWest.longitude, viewport.southWest.longitude)
+        )
+
+        var zoom = SupabasePOIViewportTileService.recommendedZoom(for: bounds)
+        var range = SupabasePOIViewportTileService.tileRange(for: bounds, zoom: zoom)
+        while range.tileCount > 196, zoom > 0 {
+            zoom -= 1
+            range = SupabasePOIViewportTileService.tileRange(for: bounds, zoom: zoom)
+        }
+
+        let paddedRange = expandedViewportTileRange(range, padding: 1)
+        let resolvedRange = paddedRange.tileCount <= 256 ? paddedRange : range
+        let countryCode = viewportEventCountryCode
+
+        let signature = [
+            "poi",
+            countryCode,
+            "z\(resolvedRange.z)",
+            "x\(resolvedRange.minX)-\(resolvedRange.maxX)",
+            "y\(resolvedRange.minY)-\(resolvedRange.maxY)"
+        ].joined(separator: "|")
+
+        if !force, signature == lastSupabasePOITileSignature { return }
+        lastSupabasePOITileSignature = signature
+
+        let cachedPOIs = aggregatedAllSupabasePOIs()
+        if !cachedPOIs.isEmpty || hasResolvedSupabasePOIFeed {
+            mergeSupabasePOIs(cachedPOIs)
+        }
+
+        let hasMissing = supabasePOITileCacheKeys(for: resolvedRange, countryCode: countryCode)
+            .contains { supabasePOITileCache[$0] == nil }
+        guard hasMissing else {
+            mergeSupabasePOIs(cachedPOIs)
+            hasResolvedSupabasePOIFeed = true
+            return
+        }
+
+        pendingSupabasePOILoadTask?.cancel()
+        pendingSupabasePOILoadTask = Task {
+            guard !Task.isCancelled else { return }
+            let service = SupabasePOIViewportTileService.shared
+            let bundle = await service.loadTiles(range: resolvedRange, countryCode: countryCode)
+            guard !Task.isCancelled else { return }
+
+            if let bundle {
+                var updatedCache = supabasePOITileCache
+                for tile in bundle.tiles {
+                    let cacheKey = supabasePOITileCacheKeyFor(tile.tile)
+                    let mapPOIs = tile.pois.compactMap(convertTilePOIToMapPOI)
+                    updatedCache[cacheKey] = mapPOIs
+                }
+
+                for x in resolvedRange.minX ... resolvedRange.maxX {
+                    for y in resolvedRange.minY ... resolvedRange.maxY {
+                        let key = supabasePOITileCacheKeyFor(z: resolvedRange.z, x: x, y: y, countryCode: countryCode)
+                        if updatedCache[key] == nil {
+                            updatedCache[key] = []
+                        }
+                    }
+                }
+
+                supabasePOITileCache = updatedCache
+            }
+
+            let allPOIs = aggregatedAllSupabasePOIs()
+            mergeSupabasePOIs(allPOIs)
+            hasResolvedSupabasePOIFeed = true
+        }
+    }
+
+    private func aggregatedAllSupabasePOIs() -> [MapPOI] {
+        supabasePOITileCache.values.flatMap { $0 }
+    }
+
+    private func mergeSupabasePOIs(_ supabasePOIs: [MapPOI]) {
+        guard !supabasePOIs.isEmpty else { return }
+        let existingIDs = Set(mixedPOIs.map(\.id))
+        let newPOIs = supabasePOIs.filter { !existingIDs.contains($0.id) }
+        guard !newPOIs.isEmpty else { return }
+        let center = mapCameraCenter ?? centerCoordinate
+        applyLoadedPOIs(mixedPOIs + newPOIs, center: center)
+    }
+
+    private func supabasePOITileCacheKeys(
+        for range: ExternalEventViewportTileRange,
+        countryCode: String
+    ) -> [String] {
+        var keys: [String] = []
+        for x in range.minX ... range.maxX {
+            for y in range.minY ... range.maxY {
+                keys.append(supabasePOITileCacheKeyFor(z: range.z, x: x, y: y, countryCode: countryCode))
+            }
+        }
+        return keys
+    }
+
+    private func supabasePOITileCacheKeyFor(_ tile: POIViewportTileKey) -> String {
+        supabasePOITileCacheKeyFor(z: tile.z, x: tile.x, y: tile.y, countryCode: tile.countryCode)
+    }
+
+    private func supabasePOITileCacheKeyFor(z: Int, x: Int, y: Int, countryCode: String) -> String {
+        ["poi", countryCode.uppercased(), String(z), String(x), String(y)].joined(separator: "::")
+    }
+
+    private func convertTilePOIToMapPOI(_ tilePOI: POIViewportTilePOI) -> MapPOI? {
+        guard let category = MapQuestCategory(rawValue: tilePOI.category) else { return nil }
+        let center = mapCameraCenter ?? centerCoordinate
+        let distance = CLLocation(latitude: tilePOI.latitude, longitude: tilePOI.longitude)
+            .distance(from: CLLocation(latitude: center.latitude, longitude: center.longitude))
+        return MapPOI(
+            id: tilePOI.id,
+            name: tilePOI.name,
+            coordinate: tilePOI.coordinate,
+            category: category,
+            address: tilePOI.address,
+            distance: distance,
+            placeDescription: tilePOI.placeDescription,
+            websiteURL: tilePOI.websiteURL.flatMap(URL.init(string:)),
+            phoneNumber: tilePOI.phoneNumber,
+            specificType: tilePOI.specificType,
+            neighborhood: tilePOI.neighborhood,
+            locality: tilePOI.locality,
+            mapItemIdentifier: nil
+        )
+    }
+
+    private func seedPOITilesToSupabase(
+        pois: [MapPOI],
+        center: CLLocationCoordinate2D
+    ) {
+        guard isSupabasePOITileFeedEnabled else { return }
+        let zoom = Self.poiTileZoom
+        let countryCode = viewportEventCountryCode
+
+        var tileGroups: [String: (key: POIViewportTileKey, pois: [POIViewportTilePOI])] = [:]
+        for poi in pois {
+            let tileKey = SupabasePOIViewportTileService.tileKey(
+                for: poi.coordinate,
+                zoom: zoom,
+                countryCode: countryCode
+            )
+            let cacheKey = supabasePOITileCacheKeyFor(tileKey)
+            if tileGroups[cacheKey] == nil {
+                tileGroups[cacheKey] = (key: tileKey, pois: [])
+            }
+            tileGroups[cacheKey]?.pois.append(POIViewportTilePOI(
+                id: poi.id,
+                name: poi.name,
+                latitude: poi.coordinate.latitude,
+                longitude: poi.coordinate.longitude,
+                category: poi.category.rawValue,
+                address: poi.address,
+                specificType: poi.specificType,
+                neighborhood: poi.neighborhood,
+                locality: poi.locality,
+                websiteURL: poi.websiteURL?.absoluteString,
+                phoneNumber: poi.phoneNumber,
+                placeDescription: poi.placeDescription
+            ))
+        }
+
+        for (_, group) in tileGroups {
+            Task.detached(priority: .utility) {
+                await SupabasePOIViewportTileService.shared.seedTile(
+                    key: group.key,
+                    pois: group.pois
+                )
+            }
+        }
     }
 
     private func scheduleViewportDrivenPOILoad(

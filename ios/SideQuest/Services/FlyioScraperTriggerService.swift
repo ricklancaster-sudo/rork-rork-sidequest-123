@@ -53,6 +53,34 @@ actor FlyioScraperTriggerService {
         }
     }
 
+    func triggerPOITileRefreshIfNeeded(
+        searchLocation: ExternalEventSearchLocation
+    ) {
+        let metroSlug = metroSlug(for: searchLocation)
+        guard let metroSlug else { return }
+
+        let triggerKey = "poi::\(metroSlug)"
+        if let lastTrigger = recentTriggers[triggerKey],
+           Date().timeIntervalSince(lastTrigger) < cooldownInterval {
+            return
+        }
+        recentTriggers[triggerKey] = Date()
+
+        Task.detached(priority: .utility) { [session, baseURL] in
+            let url = baseURL.appendingPathComponent("api/trigger-poi-refresh")
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let body: [String: String] = [
+                "metro_slug": metroSlug
+            ]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+            _ = try? await session.data(for: request)
+        }
+    }
+
     private nonisolated func metroSlug(for searchLocation: ExternalEventSearchLocation) -> String? {
         let city = ExternalEventSupport.normalizeToken(searchLocation.city)
         let state = ExternalEventSupport.normalizeStateToken(searchLocation.state)

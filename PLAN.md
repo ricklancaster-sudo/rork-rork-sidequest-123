@@ -77,6 +77,15 @@ Big-name clubs (Poppy, Sound, Delilah, etc.) aren't showing up because the Disco
 - [x] Update `ExploreMapView` annotation syncing so map pins are diffed and reused instead of being fully torn down on every viewport refresh
 - [x] Keep the older snapshot-driven event feeds as a compatibility fallback when the viewport tile feed is unavailable
 
+### 12. POI viewport tile infrastructure — Supabase-backed POI tiles ✅
+- [x] Create `POIViewportTile` models (`POIViewportTileKey`, `POIViewportTilePOI`, `POIViewportTileSnapshot`, `POIViewportTileBundle`) using same z/x/y slippy-map scheme as event tiles
+- [x] Create `SupabasePOIViewportTileService` — reads POI tiles from `poi_viewport_tiles` Supabase table, writes seed tiles back when MKLocalSearch discovers new POIs
+- [x] Add `scheduleViewportDrivenSupabasePOILoad` to `MapExploreView` — loads POI tiles from Supabase on every viewport change, merges into map pins alongside MKLocalSearch results
+- [x] Client-side seed-back: when MKLocalSearch fills a missing tile, automatically writes POIs back to Supabase so future users get instant cached results
+- [x] Remove the 16-pin POI encounter cap (`prefix(16)` → all POIs) so all cached POIs render on the map
+- [x] Add `triggerPOITileRefreshIfNeeded` to `FlyioScraperTriggerService` so the Fly.io server can batch-populate POI tiles for target metros
+- [x] POI tiles use same tile math, caching, and dedup patterns as event viewport tiles
+
 ## What stays the same
 - No hardcoded venue names — everything is 100% scrape-driven (server-side)
 - All existing lighting, camera, and lookdev in the app
@@ -84,3 +93,4 @@ Big-name clubs (Poppy, Sound, Delilah, etc.) aren't showing up because the Disco
 - Existing cache, dedup, and merge logic
 - Existing snapshot cache, dedup, and merge logic stay in place alongside the new viewport tile feed foundation
 - Fly.io server scraper unchanged (still does all the heavy scraping)
+- MKLocalSearch still runs as fallback for tiles not yet in Supabase — seeds results back for future users
