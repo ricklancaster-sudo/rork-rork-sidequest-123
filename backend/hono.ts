@@ -94,7 +94,7 @@ async function fetchFreshTileIntents(
   tile: { z: number; x: number; y: number }
 ): Promise<Set<string>> {
   const { json } = await fetchJson(
-    `${supabaseUrl}/rest/v1/external_event_viewport_tiles?select=intent,event_count,expires_at&z=eq.${tile.z}&x=eq.${tile.x}&y=eq.${tile.y}&expires_at=gte.${new Date().toISOString()}&limit=20`,
+    `${supabaseUrl}/rest/v1/external_event_viewport_tiles?select=intent,event_count,expires_at&z=eq.${tile.z}&x=eq.${tile.x}&y=eq.${tile.y}&expires_at=gte.${new Date().toISOString()}&event_count=gt.0&limit=20`,
     headers
   );
   return new Set(Array.isArray(json) ? json.map((row: any) => row.intent) : []);

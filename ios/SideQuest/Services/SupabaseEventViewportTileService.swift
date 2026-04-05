@@ -5,7 +5,22 @@ actor SupabaseEventViewportTileService {
 
     private let configuration: SupabaseEventFeedCacheConfiguration
     private let session: URLSession
-    private let decoder = JSONDecoder()
+    private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            if let date = ExternalEventSupport.iso8601Formatter.date(from: value)
+                ?? ExternalEventSupport.iso8601NoFractionalSeconds.date(from: value) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid ISO-8601 timestamp: \(value)"
+            )
+        }
+        return decoder
+    }()
     private let viewportTileTable: String = "external_event_viewport_tiles"
 
     init(
@@ -107,8 +122,8 @@ actor SupabaseEventViewportTileService {
             URLQueryItem(name: "y", value: "gte.\(range.minY)"),
             URLQueryItem(name: "y", value: "lte.\(range.maxY)"),
             URLQueryItem(name: "expires_at", value: "gte.\(Self.postgrestTimestamp(from: Date().addingTimeInterval(-Self.staleDisplayWindow)))"),
-            URLQueryItem(name: "order", value: "y.asc,x.asc"),
-            URLQueryItem(name: "limit", value: "\(range.tileCount)")
+            URLQueryItem(name: "order", value: "y.asc,x.asc,event_count.desc,fetched_at.desc"),
+            URLQueryItem(name: "limit", value: "\(min(max(range.tileCount * 4, range.tileCount), 800))")
         ]
 
         if let state {
@@ -150,14 +165,31 @@ actor SupabaseEventViewportTileService {
     }
 
     private func decodeTiles(from rows: [[String: Any]]) -> [ExternalEventViewportTileSnapshot] {
-        rows.compactMap { row in
+        var bestSnapshotsByTile: [String: ExternalEventViewportTileSnapshot] = [:]
+
+        for row in rows {
+            let decodedSnapshot: ExternalEventViewportTileSnapshot?
             if let snapshotObject = row["snapshot"],
                let snapshotData = try? JSONSerialization.data(withJSONObject: snapshotObject, options: []),
                let snapshot = try? decoder.decode(ExternalEventViewportTileSnapshot.self, from: snapshotData) {
-                return snapshot
+                decodedSnapshot = snapshot
+            } else {
+                decodedSnapshot = fallbackTile(from: row)
             }
-            return fallbackTile(from: row)
+
+            guard let snapshot = decodedSnapshot else { continue }
+            let physicalTileKey = Self.physicalTileKey(for: snapshot.tile)
+            guard let existing = bestSnapshotsByTile[physicalTileKey] else {
+                bestSnapshotsByTile[physicalTileKey] = snapshot
+                continue
+            }
+
+            if Self.shouldPrefer(snapshot, over: existing) {
+                bestSnapshotsByTile[physicalTileKey] = snapshot
+            }
         }
+
+        return Array(bestSnapshotsByTile.values)
     }
 
     private func fallbackTile(from row: [String: Any]) -> ExternalEventViewportTileSnapshot? {
@@ -306,6 +338,40 @@ actor SupabaseEventViewportTileService {
         }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: string)
+    }
+
+    nonisolated private static func physicalTileKey(for tile: ExternalEventViewportTileKey) -> String {
+        [
+            tile.intent.rawValue,
+            tile.countryCode.uppercased(),
+            String(tile.z),
+            String(tile.x),
+            String(tile.y)
+        ].joined(separator: "::")
+    }
+
+    nonisolated private static func shouldPrefer(
+        _ candidate: ExternalEventViewportTileSnapshot,
+        over existing: ExternalEventViewportTileSnapshot
+    ) -> Bool {
+        if candidate.mergedEvents.count != existing.mergedEvents.count {
+            return candidate.mergedEvents.count > existing.mergedEvents.count
+        }
+        if candidate.eventCount != existing.eventCount {
+            return candidate.eventCount > existing.eventCount
+        }
+        if candidate.fetchedAt != existing.fetchedAt {
+            return candidate.fetchedAt > existing.fetchedAt
+        }
+        switch (candidate.expiresAt, existing.expiresAt) {
+        case let (lhs?, rhs?) where lhs != rhs:
+            return lhs > rhs
+        case (_?, nil):
+            return true
+        default:
+            break
+        }
+        return (candidate.tile.state ?? "") < (existing.tile.state ?? "")
     }
 
     static let staleDisplayWindow: TimeInterval = 72 * 60 * 60
