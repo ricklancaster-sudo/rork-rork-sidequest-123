@@ -618,6 +618,16 @@ struct MapExploreView: View {
         )
     }
 
+    private func startPeriodicCronSweep() {
+        Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30 * 60))
+                guard !Task.isCancelled else { break }
+                await CronSweepService.shared.sweepIfNeeded()
+            }
+        }
+    }
+
     private func scheduleMapWorldRefresh() {
         let nextSignature = mapWorldDependencyKey
         guard nextSignature != mapWorldSignature || preparedMapWorldSnapshot.encounters.isEmpty else { return }
@@ -726,6 +736,7 @@ struct MapExploreView: View {
             Task.detached(priority: .utility) {
                 await CronSweepService.shared.sweepIfNeeded()
             }
+            startPeriodicCronSweep()
             Task {
                 try? await Task.sleep(for: .seconds(2))
                 isInitialPOILoadProtected = false
