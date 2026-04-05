@@ -35,6 +35,15 @@ private struct ViewportEventRequest: Equatable {
     let signature: String
 }
 
+private enum ViewportEventFeedState: Equatable {
+    case idle
+    case loading
+    case warming
+    case ready
+    case zoomInRequired
+    case unavailable(String)
+}
+
 private struct POITileDescriptor: Hashable {
     let category: MapQuestCategory
     let center: CLLocationCoordinate2D
@@ -103,7 +112,9 @@ struct MapExploreView: View {
     @State private var viewportExternalEvents: [ExternalEvent] = []
     @State private var pendingViewportEventLoadTask: Task<Void, Never>?
     @State private var lastViewportEventRequestSignature: String = ""
+    @State private var activeViewportEventRequest: ViewportEventRequest?
     @State private var hasResolvedViewportEventFeed: Bool = false
+    @State private var viewportEventFeedState: ViewportEventFeedState = .idle
     @State private var backgroundPOILoadTasks: [String: Task<Void, Never>] = [:]
     @State private var allCachedPOIs: [MapPOI] = []
     @State private var emptyPOITileTimestamps: [String: Date] = [:]
@@ -117,6 +128,9 @@ struct MapExploreView: View {
     private static let maxConcurrentPOISearches: Int = 3
     private static let emptyTileRetryInterval: TimeInterval = 60
     private static let poiTileZoom: Int = 12
+    private static let serverEventTileZoom: Int = 11
+    private static let maxViewportEventTileCount: Int = 196
+    private static let viewportWarmupPollAttempts: Int = 10
 
     private let fallbackCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 34.0900, longitude: -118.3617)
     private var previewCoordinate: CLLocationCoordinate2D? {
@@ -204,26 +218,8 @@ struct MapExploreView: View {
         SupabasePOIViewportTileService.shared.isConfigured
     }
 
-    private var fallbackMapEvents: [ExternalEvent] {
-        appState.externalEventFeed + appState.eventsTabExternalEventFeed + appState.exclusiveExternalEventFeed
-    }
-
     private var activeMapEventFeed: [ExternalEvent] {
-        guard isViewportEventTileFeedEnabled else { return fallbackMapEvents }
-        if hasResolvedViewportEventFeed {
-            if viewportExternalEvents.isEmpty {
-                return []
-            }
-            let fallback = fallbackMapEvents
-            let viewportIDs = Set(viewportExternalEvents.map(\.id))
-            let extraFallback = fallback.filter { event in
-                guard !viewportIDs.contains(event.id) else { return false }
-                guard let coord = eventCoordinate(event), let viewport = currentViewport else { return false }
-                return coordinateIsInsideExpandedViewport(coord, viewport: viewport)
-            }
-            return viewportExternalEvents + extraFallback
-        }
-        return fallbackMapEvents
+        return viewportExternalEvents
     }
 
     private var viewportEventTileIntents: [ExternalDiscoveryIntent] {
@@ -622,16 +618,6 @@ struct MapExploreView: View {
         )
     }
 
-    private func startPeriodicCronSweep() {
-        Task.detached(priority: .utility) {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(30 * 60))
-                guard !Task.isCancelled else { break }
-                await CronSweepService.shared.sweepIfNeeded()
-            }
-        }
-    }
-
     private func scheduleMapWorldRefresh() {
         let nextSignature = mapWorldDependencyKey
         guard nextSignature != mapWorldSignature || preparedMapWorldSnapshot.encounters.isEmpty else { return }
@@ -687,6 +673,9 @@ struct MapExploreView: View {
                 cinematicAtmosphereOverlay
                     .allowsHitTesting(false)
             }
+            .overlay(alignment: .bottomLeading) {
+                viewportEventStatusOverlay
+            }
 
             if !poiService.locationAuthorized {
                 locationPermissionOverlay
@@ -720,9 +709,6 @@ struct MapExploreView: View {
             if let previewCoordinate {
                 poiService.fallbackCoordinate = previewCoordinate
             }
-            if appState.externalEventFeed.isEmpty && !appState.isRefreshingExternalEvents {
-                await appState.refreshExternalEvents(forceRefresh: false)
-            }
             logExternalEventDiagnosticsIfNeeded(signature: externalEventDiagnosticsSignature)
             if poiService.locationAuthorized, !usesPreviewLocation {
                 poiService.requestLocation()
@@ -737,10 +723,6 @@ struct MapExploreView: View {
             scheduleViewportDrivenPOILoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleViewportDrivenEventLoad(center: centerCoordinate, visibleRadius: currentVisibleRadius, force: true)
             scheduleMapWorldRefresh()
-            Task.detached(priority: .utility) {
-                await CronSweepService.shared.sweepIfNeeded()
-            }
-            startPeriodicCronSweep()
             Task {
                 try? await Task.sleep(for: .seconds(2))
                 isInitialPOILoadProtected = false
@@ -1674,150 +1656,72 @@ struct MapExploreView: View {
         visibleRadius: Double,
         force: Bool = false
     ) {
-        guard isViewportEventTileFeedEnabled else { return }
-
-        let viewport = currentViewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
-        let request = makeViewportEventRequest(for: viewport)
-        let wideRequest = makeWideZoomEventRequest(for: viewport)
-        let combinedSignature = request.signature + "|" + (wideRequest?.signature ?? "")
-        if !force, combinedSignature == lastViewportEventRequestSignature {
+        guard isViewportEventTileFeedEnabled else {
+            activeViewportEventRequest = nil
+            viewportExternalEvents = []
+            hasResolvedViewportEventFeed = true
+            lastViewportEventRequestSignature = ""
+            viewportEventFeedState = .unavailable("Supabase viewport tiles are not configured.")
             return
         }
-        lastViewportEventRequestSignature = combinedSignature
 
-        let cachedEvents = aggregatedAllCachedViewportEvents()
-        if !cachedEvents.isEmpty {
-            viewportExternalEvents = cachedEvents
+        let viewport = currentViewport ?? fallbackViewport(center: center, visibleRadius: visibleRadius)
+        guard let request = makeViewportEventRequest(for: viewport) else {
+            activeViewportEventRequest = nil
+            viewportExternalEvents = []
             hasResolvedViewportEventFeed = true
+            lastViewportEventRequestSignature = ""
+            viewportEventFeedState = .zoomInRequired
+            pendingViewportEventLoadTask?.cancel()
+            return
         }
+
+        if !force, request.signature == lastViewportEventRequestSignature {
+            return
+        }
+        lastViewportEventRequestSignature = request.signature
+        activeViewportEventRequest = request
+        viewportEventTileCache = prunedViewportEventTileCache(viewportEventTileCache, keeping: request)
+
+        let cachedEvents = aggregatedViewportEvents(for: request, using: viewportEventTileCache)
+        viewportExternalEvents = cachedEvents
+        hasResolvedViewportEventFeed = !cachedEvents.isEmpty
 
         let missingIntents = request.intents.filter { intent in
             requestTileCacheKeys(for: request, intent: intent).contains { viewportEventTileCache[$0] == nil }
         }
-        let wideMissingIntents: [ExternalDiscoveryIntent] = {
-            guard let wideRequest else { return [] }
-            return wideRequest.intents.filter { intent in
-                requestTileCacheKeys(for: wideRequest, intent: intent).contains { viewportEventTileCache[$0] == nil }
-            }
-        }()
-
         let staleIntents = request.intents.filter { intent in
             requestTileCacheKeys(for: request, intent: intent).contains { key in
                 guard let tiles = viewportEventTileCache[key] else { return false }
                 return tiles.contains(where: { SupabaseEventViewportTileService.isTileStale($0) })
             }
         }
-        let wideStaleIntents: [ExternalDiscoveryIntent] = {
-            guard let wideRequest else { return [] }
-            return wideRequest.intents.filter { intent in
-                requestTileCacheKeys(for: wideRequest, intent: intent).contains { key in
-                    guard let tiles = viewportEventTileCache[key] else { return false }
-                    return tiles.contains(where: { SupabaseEventViewportTileService.isTileStale($0) })
-                }
-            }
-        }()
 
-        let needsFetch = !missingIntents.isEmpty || !wideMissingIntents.isEmpty
-        let needsStaleRefresh = !staleIntents.isEmpty || !wideStaleIntents.isEmpty
+        let needsFetch = !missingIntents.isEmpty
+        let needsStaleRefresh = !staleIntents.isEmpty
 
         guard needsFetch || needsStaleRefresh else {
             viewportExternalEvents = cachedEvents
             hasResolvedViewportEventFeed = true
+            viewportEventFeedState = .ready
             return
         }
 
-        viewportExternalEvents = cachedEvents
-        hasResolvedViewportEventFeed = true
+        viewportEventFeedState = cachedEvents.isEmpty ? .loading : .ready
 
         pendingViewportEventLoadTask?.cancel()
         pendingViewportEventLoadTask = Task {
             guard !Task.isCancelled else { return }
-
-            let allDetailedIntents = Array(Set(missingIntents + staleIntents))
-            let allWideIntents = Array(Set(wideMissingIntents + wideStaleIntents))
-
-            let service = SupabaseEventViewportTileService.shared
-            let loadedBundles = await withTaskGroup(
-                of: ExternalEventViewportTileBundle?.self,
-                returning: [ExternalEventViewportTileBundle].self
-            ) { group in
-                for intent in allDetailedIntents {
-                    group.addTask {
-                        await service.loadBundle(
-                            intent: intent,
-                            range: request.range,
-                            countryCode: request.countryCode,
-                            state: nil
-                        )
-                    }
-                }
-                if let wideRequest {
-                    for intent in allWideIntents {
-                        group.addTask {
-                            await service.loadBundle(
-                                intent: intent,
-                                range: wideRequest.range,
-                                countryCode: wideRequest.countryCode,
-                                state: nil
-                            )
-                        }
-                    }
-                }
-
-                var bundles: [ExternalEventViewportTileBundle] = []
-                for await bundle in group {
-                    if let bundle {
-                        bundles.append(bundle)
-                    }
-                }
-                return bundles
-            }
-
-            guard !Task.isCancelled else { return }
-
-            if loadedBundles.isEmpty {
-                let viewportCenter = center
-                await FlyioScraperTriggerService.shared.triggerOnDemandTileScrape(
-                    latitude: viewportCenter.latitude,
-                    longitude: viewportCenter.longitude
-                )
-                hasResolvedViewportEventFeed = true
-                return
-            }
-
-            var updatedCache = viewportEventTileCache
-            var totalEventsLoaded = 0
-            for bundle in loadedBundles {
-                for tile in bundle.tiles {
-                    let cacheKey = viewportTileCacheKey(for: tile.tile)
-                    var cachedSnapshots = updatedCache[cacheKey] ?? []
-                    if let existingIndex = cachedSnapshots.firstIndex(where: { $0.id == tile.id }) {
-                        cachedSnapshots[existingIndex] = tile
-                    } else {
-                        cachedSnapshots.append(tile)
-                    }
-                    updatedCache[cacheKey] = cachedSnapshots
-                    totalEventsLoaded += tile.mergedEvents.count
-                }
-            }
-
-            viewportEventTileCache = updatedCache
-            viewportExternalEvents = aggregatedAllCachedViewportEvents()
-            hasResolvedViewportEventFeed = true
-
-            if totalEventsLoaded == 0 {
-                let viewportCenter = center
-                await FlyioScraperTriggerService.shared.triggerOnDemandTileScrape(
-                    latitude: viewportCenter.latitude,
-                    longitude: viewportCenter.longitude
-                )
-            }
+            let intentsToLoad = Array(Set(missingIntents + staleIntents))
+            await loadViewportEventBundles(
+                for: request,
+                intents: intentsToLoad,
+                center: center
+            )
         }
     }
 
-    private static let wideEventZoom: Int = 11
-
-    private func makeWideZoomEventRequest(for viewport: ExploreMapViewport) -> ViewportEventRequest? {
+    private func makeViewportEventRequest(for viewport: ExploreMapViewport) -> ViewportEventRequest? {
         let bounds = ExternalEventViewportBounds(
             northLatitude: max(viewport.northEast.latitude, viewport.northWest.latitude),
             southLatitude: min(viewport.southEast.latitude, viewport.southWest.latitude),
@@ -1825,54 +1729,20 @@ struct MapExploreView: View {
             westLongitude: min(viewport.northWest.longitude, viewport.southWest.longitude)
         )
 
-        let detailedZoom = SupabaseEventViewportTileService.shared.recommendedZoom(for: bounds)
-        guard detailedZoom != Self.wideEventZoom else { return nil }
+        let range = SupabaseEventViewportTileService.shared.tileRange(
+            for: bounds,
+            zoom: Self.serverEventTileZoom
+        )
 
-        let range = SupabaseEventViewportTileService.shared.tileRange(for: bounds, zoom: Self.wideEventZoom)
         let paddedRange = expandedViewportTileRange(range, padding: 1)
-        let resolvedRange = paddedRange.tileCount <= 196 ? paddedRange : range
-        let intents = viewportEventTileIntents
-        let countryCode = viewportEventCountryCode
-        let signature = [
-            countryCode,
-            intents.map(\.rawValue).joined(separator: ","),
-            "wz\(resolvedRange.z)",
-            "x\(resolvedRange.minX)-\(resolvedRange.maxX)",
-            "y\(resolvedRange.minY)-\(resolvedRange.maxY)"
-        ].joined(separator: "|")
-
-        return ViewportEventRequest(
-            bounds: bounds,
-            range: resolvedRange,
-            intents: intents,
-            countryCode: countryCode,
-            signature: signature
-        )
-    }
-
-    private func aggregatedAllCachedViewportEvents() -> [ExternalEvent] {
-        viewportEventTileCache.values
-            .flatMap { $0 }
-            .flatMap(\.mergedEvents)
-    }
-
-    private func makeViewportEventRequest(for viewport: ExploreMapViewport) -> ViewportEventRequest {
-        let bounds = ExternalEventViewportBounds(
-            northLatitude: max(viewport.northEast.latitude, viewport.northWest.latitude),
-            southLatitude: min(viewport.southEast.latitude, viewport.southWest.latitude),
-            eastLongitude: max(viewport.northEast.longitude, viewport.southEast.longitude),
-            westLongitude: min(viewport.northWest.longitude, viewport.southWest.longitude)
-        )
-
-        var zoom = SupabaseEventViewportTileService.shared.recommendedZoom(for: bounds)
-        var range = SupabaseEventViewportTileService.shared.tileRange(for: bounds, zoom: zoom)
-        while range.tileCount > 196, zoom > 0 {
-            zoom -= 1
-            range = SupabaseEventViewportTileService.shared.tileRange(for: bounds, zoom: zoom)
+        let resolvedRange: ExternalEventViewportTileRange
+        if paddedRange.tileCount <= Self.maxViewportEventTileCount {
+            resolvedRange = paddedRange
+        } else if range.tileCount <= Self.maxViewportEventTileCount {
+            resolvedRange = range
+        } else {
+            return nil
         }
-
-        let paddedRange = expandedViewportTileRange(range, padding: 1)
-        let resolvedRange = paddedRange.tileCount <= 196 ? paddedRange : range
         let intents = viewportEventTileIntents
         let signature = [
             viewportEventCountryCode,
@@ -1962,6 +1832,176 @@ struct MapExploreView: View {
             .flatMap(\.mergedEvents)
     }
 
+    private func prunedViewportEventTileCache(
+        _ cache: [String: [ExternalEventViewportTileSnapshot]],
+        keeping request: ViewportEventRequest
+    ) -> [String: [ExternalEventViewportTileSnapshot]] {
+        let keepKeys = Set(
+            request.intents.flatMap { intent in
+                requestTileCacheKeys(for: request, intent: intent)
+            }
+        )
+        return cache.filter { keepKeys.contains($0.key) }
+    }
+
+    private func mergedViewportEventTileCache(
+        _ bundles: [ExternalEventViewportTileBundle],
+        into existingCache: [String: [ExternalEventViewportTileSnapshot]],
+        keeping request: ViewportEventRequest
+    ) -> [String: [ExternalEventViewportTileSnapshot]] {
+        var updatedCache = prunedViewportEventTileCache(existingCache, keeping: request)
+
+        for bundle in bundles {
+            for tile in bundle.tiles {
+                let cacheKey = viewportTileCacheKey(for: tile.tile)
+                var cachedSnapshots = updatedCache[cacheKey] ?? []
+                if let existingIndex = cachedSnapshots.firstIndex(where: { $0.id == tile.id }) {
+                    cachedSnapshots[existingIndex] = tile
+                } else {
+                    cachedSnapshots.append(tile)
+                }
+                updatedCache[cacheKey] = cachedSnapshots
+            }
+        }
+
+        return updatedCache
+    }
+
+    private func latestViewportTileFetchDate(
+        for request: ViewportEventRequest,
+        using cache: [String: [ExternalEventViewportTileSnapshot]]
+    ) -> Date? {
+        request.intents
+            .flatMap { intent in
+                requestTileCacheKeys(for: request, intent: intent).flatMap { cache[$0] ?? [] }
+            }
+            .map(\.fetchedAt)
+            .max()
+    }
+
+    private func loadedViewportEventIntents(for request: ViewportEventRequest) -> [ExternalDiscoveryIntent] {
+        request.intents.filter { intent in
+            requestTileCacheKeys(for: request, intent: intent).contains { key in
+                guard let tiles = viewportEventTileCache[key], !tiles.isEmpty else { return false }
+                return tiles.contains { !$0.mergedEvents.isEmpty }
+            }
+        }
+    }
+
+    private func fetchViewportEventBundles(
+        for request: ViewportEventRequest,
+        intents: [ExternalDiscoveryIntent]
+    ) async -> [ExternalEventViewportTileBundle] {
+        guard !intents.isEmpty else { return [] }
+
+        let service = SupabaseEventViewportTileService.shared
+        return await withTaskGroup(
+            of: ExternalEventViewportTileBundle?.self,
+            returning: [ExternalEventViewportTileBundle].self
+        ) { group in
+            for intent in intents {
+                group.addTask {
+                    await service.loadBundle(
+                        intent: intent,
+                        range: request.range,
+                        countryCode: request.countryCode,
+                        state: nil
+                    )
+                }
+            }
+
+            var bundles: [ExternalEventViewportTileBundle] = []
+            for await bundle in group {
+                if let bundle {
+                    bundles.append(bundle)
+                }
+            }
+            return bundles
+        }
+    }
+
+    private func loadViewportEventBundles(
+        for request: ViewportEventRequest,
+        intents: [ExternalDiscoveryIntent],
+        center: CLLocationCoordinate2D
+    ) async {
+        let loadedBundles = await fetchViewportEventBundles(for: request, intents: intents)
+        guard !Task.isCancelled else { return }
+
+        if loadedBundles.isEmpty {
+            viewportExternalEvents = []
+            hasResolvedViewportEventFeed = true
+            lastViewportEventRequestSignature = ""
+            viewportEventFeedState = .unavailable("Unable to load server map tiles right now.")
+            return
+        }
+
+        let updatedCache = mergedViewportEventTileCache(
+            loadedBundles,
+            into: viewportEventTileCache,
+            keeping: request
+        )
+        viewportEventTileCache = updatedCache
+
+        let currentEvents = aggregatedViewportEvents(for: request, using: updatedCache)
+        viewportExternalEvents = currentEvents
+        hasResolvedViewportEventFeed = true
+
+        if !currentEvents.isEmpty {
+            viewportEventFeedState = .ready
+            return
+        }
+
+        viewportEventFeedState = .warming
+        await FlyioScraperTriggerService.shared.triggerOnDemandTileScrape(
+            latitude: center.latitude,
+            longitude: center.longitude
+        )
+
+        let warmupSucceeded = await repollViewportEventBundlesAfterWarmup(
+            for: request
+        )
+        guard !Task.isCancelled else { return }
+
+        if !warmupSucceeded {
+            lastViewportEventRequestSignature = ""
+            viewportEventFeedState = .unavailable("No live event tiles have arrived for this area yet.")
+        }
+    }
+
+    private func repollViewportEventBundlesAfterWarmup(
+        for request: ViewportEventRequest
+    ) async -> Bool {
+        for _ in 0 ..< Self.viewportWarmupPollAttempts {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return false }
+
+            let bundles = await fetchViewportEventBundles(for: request, intents: request.intents)
+            guard !Task.isCancelled else { return false }
+            if bundles.isEmpty {
+                continue
+            }
+
+            let updatedCache = mergedViewportEventTileCache(
+                bundles,
+                into: viewportEventTileCache,
+                keeping: request
+            )
+            viewportEventTileCache = updatedCache
+
+            let currentEvents = aggregatedViewportEvents(for: request, using: updatedCache)
+            viewportExternalEvents = currentEvents
+            hasResolvedViewportEventFeed = true
+
+            if !currentEvents.isEmpty {
+                viewportEventFeedState = .ready
+                return true
+            }
+        }
+
+        return false
+    }
+
     private func shouldShowExternalEventOnMap(_ event: ExternalEvent, centerLocation: CLLocation) -> Bool {
         guard !isCancelledExternalEvent(event), !isEndedExternalEvent(event) else { return false }
         guard let coordinate = eventCoordinate(event) else { return false }
@@ -1987,6 +2027,108 @@ struct MapExploreView: View {
             && coordinate.longitude >= west - longitudePadding
             && coordinate.longitude <= east + longitudePadding
     }
+
+    private var viewportEventStatusOverlay: some View {
+        Group {
+            if isViewportEventTileFeedEnabled {
+                VStack(alignment: .leading, spacing: 8) {
+                    switch viewportEventFeedState {
+                    case .loading:
+                        Label("Loading live map tiles...", systemImage: "dot.radiowaves.left.and.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                    case .warming:
+                        Label("Warming this area on the server...", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                    case .zoomInRequired:
+                        Label("Zoom in to load live event pins", systemImage: "plus.magnifyingglass")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                    case .unavailable(let message):
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                    case .ready where viewportExternalEvents.isEmpty:
+                        Label("No live pins in this viewport yet", systemImage: "mappin.slash")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                    default:
+                        EmptyView()
+                    }
+
+#if DEBUG
+                    if let request = activeViewportEventRequest {
+                        let loadedIntents = loadedViewportEventIntents(for: request)
+                        let missingIntents = request.intents.filter { !loadedIntents.contains($0) }
+                        let latestFetch = latestViewportTileFetchDate(for: request, using: viewportEventTileCache)
+                        VStack(alignment: .leading, spacing: 3) {
+                            debugRow(label: "supabase_configured", value: isViewportEventTileFeedEnabled ? "true" : "false")
+                            debugRow(label: "using_viewport_tiles", value: isViewportEventTileFeedEnabled ? "true" : "false")
+                            debugRow(label: "zoom", value: "\(request.range.z)")
+                            debugRow(
+                                label: "tile_range",
+                                value: "x \(request.range.minX)-\(request.range.maxX) · y \(request.range.minY)-\(request.range.maxY)"
+                            )
+                            debugRow(
+                                label: "loaded_intents",
+                                value: loadedIntents.map(\.rawValue).joined(separator: ", ")
+                            )
+                            debugRow(
+                                label: "missing_intents",
+                                value: missingIntents.map(\.rawValue).joined(separator: ", ")
+                            )
+                            debugRow(label: "tile_count", value: "\(request.range.tileCount)")
+                            debugRow(
+                                label: "last_tile_fetched",
+                                value: latestFetch.map(Self.viewportDebugDateFormatter.string(from:)) ?? "n/a"
+                            )
+                            debugRow(label: "fallback_used", value: "false")
+                        }
+                    }
+#endif
+                }
+                .padding(12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(.white.opacity(0.10), lineWidth: 1)
+                }
+                .padding(.leading, 16)
+                .padding(.bottom, selectedEncounter == nil ? 88 : 220)
+                .opacity(viewportStatusOverlayOpacity)
+            }
+        }
+    }
+
+    private var viewportStatusOverlayOpacity: Double {
+        if case .idle = viewportEventFeedState {
+            return 0
+        }
+        if case .ready = viewportEventFeedState, !viewportExternalEvents.isEmpty {
+            return 0
+        }
+        return 1
+    }
+
+#if DEBUG
+    private func debugRow(label: String, value: String) -> some View {
+        HStack(spacing: 6) {
+            Text("\(label):")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white.opacity(0.62))
+            Text(value.isEmpty ? "none" : value)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.white.opacity(0.88))
+        }
+    }
+
+    private static let viewportDebugDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+#endif
 
     private static let widePOIZoom: Int = 11
 
