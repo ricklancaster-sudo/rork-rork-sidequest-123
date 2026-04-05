@@ -211,12 +211,16 @@ struct MapExploreView: View {
     private var activeMapEventFeed: [ExternalEvent] {
         guard isViewportEventTileFeedEnabled else { return fallbackMapEvents }
         if hasResolvedViewportEventFeed {
-            let fallback = fallbackMapEvents
             if viewportExternalEvents.isEmpty {
-                return fallback
+                return []
             }
+            let fallback = fallbackMapEvents
             let viewportIDs = Set(viewportExternalEvents.map(\.id))
-            let extraFallback = fallback.filter { !viewportIDs.contains($0.id) }
+            let extraFallback = fallback.filter { event in
+                guard !viewportIDs.contains(event.id) else { return false }
+                guard let coord = eventCoordinate(event), let viewport = currentViewport else { return false }
+                return coordinateIsInsideExpandedViewport(coord, viewport: viewport)
+            }
             return viewportExternalEvents + extraFallback
         }
         return fallbackMapEvents
@@ -1769,9 +1773,20 @@ struct MapExploreView: View {
                 return bundles
             }
 
-            guard !Task.isCancelled, !loadedBundles.isEmpty else { return }
+            guard !Task.isCancelled else { return }
+
+            if loadedBundles.isEmpty {
+                let viewportCenter = center
+                await FlyioScraperTriggerService.shared.triggerOnDemandTileScrape(
+                    latitude: viewportCenter.latitude,
+                    longitude: viewportCenter.longitude
+                )
+                hasResolvedViewportEventFeed = true
+                return
+            }
 
             var updatedCache = viewportEventTileCache
+            var totalEventsLoaded = 0
             for bundle in loadedBundles {
                 for tile in bundle.tiles {
                     let cacheKey = viewportTileCacheKey(for: tile.tile)
@@ -1782,12 +1797,21 @@ struct MapExploreView: View {
                         cachedSnapshots.append(tile)
                     }
                     updatedCache[cacheKey] = cachedSnapshots
+                    totalEventsLoaded += tile.mergedEvents.count
                 }
             }
 
             viewportEventTileCache = updatedCache
             viewportExternalEvents = aggregatedAllCachedViewportEvents()
             hasResolvedViewportEventFeed = true
+
+            if totalEventsLoaded == 0 {
+                let viewportCenter = center
+                await FlyioScraperTriggerService.shared.triggerOnDemandTileScrape(
+                    latitude: viewportCenter.latitude,
+                    longitude: viewportCenter.longitude
+                )
+            }
         }
     }
 

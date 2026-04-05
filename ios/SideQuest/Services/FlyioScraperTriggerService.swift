@@ -53,6 +53,61 @@ actor FlyioScraperTriggerService {
         }
     }
 
+    func triggerOnDemandTileScrape(
+        latitude: Double,
+        longitude: Double
+    ) {
+        let triggerKey = "ondemand::\(Int(latitude * 100))::\(Int(longitude * 100))"
+        if let lastTrigger = recentTriggers[triggerKey],
+           Date().timeIntervalSince(lastTrigger) < 60 {
+            return
+        }
+        recentTriggers[triggerKey] = Date()
+
+        Task.detached(priority: .utility) { [session, baseURL] in
+            let url = baseURL.appendingPathComponent("api/trigger-on-demand-tile")
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let body: [String: Any] = [
+                "lat": latitude,
+                "lon": longitude
+            ]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+            _ = try? await session.data(for: request)
+        }
+    }
+
+    func triggerMetroBatchIfNeeded(
+        searchLocation: ExternalEventSearchLocation
+    ) {
+        let metroSlug = metroSlug(for: searchLocation)
+        guard let metroSlug else { return }
+
+        let triggerKey = "batch::\(metroSlug)"
+        if let lastTrigger = recentTriggers[triggerKey],
+           Date().timeIntervalSince(lastTrigger) < cooldownInterval {
+            return
+        }
+        recentTriggers[triggerKey] = Date()
+
+        Task.detached(priority: .utility) { [session, baseURL] in
+            let url = baseURL.appendingPathComponent("api/trigger-metro-batch")
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let body: [String: String] = [
+                "metro_slug": metroSlug
+            ]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+            _ = try? await session.data(for: request)
+        }
+    }
+
     func triggerPOITileRefreshIfNeeded(
         searchLocation: ExternalEventSearchLocation
     ) {
