@@ -1,0 +1,1305 @@
+import type { WorkerConfig } from "../lib/config";
+import {
+  sanitizeReviewRating,
+  sanitizeReviewCount,
+  venueReviewKey,
+  normalizeToken,
+  normalizeStateToken,
+} from "../lib/normalize";
+import {
+  upsertVenueReview,
+  getCachedVenueReviews,
+  type SupabaseClient,
+} from "../lib/supabase";
+import type { EventResult } from "./ticketmaster";
+
+interface ReviewSignal {
+  rating: number;
+  reviewCount: number | null;
+  url: string;
+  source: "scraped_google_maps";
+}
+
+interface ReviewLookup {
+  cacheKey: string;
+  venueName: string;
+  addressLine1?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  query: string;
+  reviewURLs: string[];
+}
+
+const DESKTOP_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+const NIGHTLIFE_BLOCK_SIGNALS = [
+  "nightclub",
+  "night club",
+  "strip club",
+  "gentlemen's club",
+  "gentlemens club",
+];
+
+const MIN_REVIEW_COUNT_FOR_JSON_TRUST = 5;
+const MIN_REVIEW_COUNT_FOR_AGGREGATE_TRUST = 10;
+const STRONG_REVIEW_COUNT_THRESHOLD = 50;
+
+export async function enrichEventsWithReviews(
+  events: EventResult[],
+  config: WorkerConfig,
+  supabase: SupabaseClient
+): Promise<{
+  events: EventResult[];
+  hitCount: number;
+  missCount: number;
+  errorCount: number;
+  poisonedCount: number;
+}> {
+  let hitCount = 0;
+  let missCount = 0;
+  let errorCount = 0;
+  let poisonedCount = 0;
+
+  const venueKeyMap = new Map<string, EventResult[]>();
+  for (const event of events) {
+    if (!shouldScrapeGoogleReviews(event)) continue;
+    const key = venueReviewKey(
+      event.venueName || event.title,
+      event.city,
+      event.state,
+      event.postalCode
+    );
+    if (!key || key === "venue:") continue;
+    const existing = venueKeyMap.get(key) || [];
+    existing.push(event);
+    venueKeyMap.set(key, existing);
+  }
+
+  const allKeys = Array.from(venueKeyMap.keys());
+  const cached = await getCachedVenueReviews(supabase, allKeys);
+
+  const uncachedKeys: string[] = [];
+  for (const key of allKeys) {
+    if (!cached.has(key)) uncachedKeys.push(key);
+  }
+
+  const freshSignals = new Map<string, ReviewSignal>();
+
+  if (uncachedKeys.length > 0) {
+    const batchSize = 3;
+    for (let i = 0; i < uncachedKeys.length; i += batchSize) {
+      const batch = uncachedKeys.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(async (key) => {
+          const representativeEvents = venueKeyMap.get(key);
+          if (!representativeEvents || representativeEvents.length === 0)
+            return null;
+          const rep = representativeEvents[0];
+          const lookup = buildReviewLookup(rep);
+          if (!lookup) return null;
+          return fetchReviewSignal(lookup, config);
+        })
+      );
+
+      for (let j = 0; j < batch.length; j++) {
+        const key = batch[j];
+        const settled = results[j];
+        const representativeEvents = venueKeyMap.get(key);
+        const rep = representativeEvents?.[0];
+
+        if (settled.status === "fulfilled" && settled.value) {
+          const signal = settled.value;
+
+          const sanitizedRating = sanitizeReviewRating(signal.rating);
+          const sanitizedCount = sanitizeReviewCount(signal.reviewCount);
+
+          if (!sanitizedRating) {
+            poisonedCount++;
+            console.log(
+              `[reviews] Poisoned: ${rep?.venueName || key} => rating=${signal.rating}, count=${signal.reviewCount}`
+            );
+            await upsertVenueReview(supabase, {
+              venue_key: key,
+              venue_name: rep?.venueName || rep?.title || "",
+              city: rep?.city ?? undefined,
+              state: rep?.state ?? undefined,
+              postal_code: rep?.postalCode ?? undefined,
+              latitude: rep?.latitude ?? undefined,
+              longitude: rep?.longitude ?? undefined,
+              google_rating: signal.rating,
+              google_review_count: signal.reviewCount ?? undefined,
+              google_maps_url: signal.url,
+              review_source: signal.source,
+              is_poisoned: true,
+              poison_reason: `Rating ${signal.rating} failed sanitization`,
+            });
+            continue;
+          }
+
+          console.log(
+            `[reviews] Hit: ${rep?.venueName || key} => ${sanitizedRating} (${sanitizedCount ?? 0} reviews)`
+          );
+          freshSignals.set(key, signal);
+          hitCount++;
+
+          await upsertVenueReview(supabase, {
+            venue_key: key,
+            venue_name: rep?.venueName || rep?.title || "",
+            city: rep?.city ?? undefined,
+            state: rep?.state ?? undefined,
+            postal_code: rep?.postalCode ?? undefined,
+            latitude: rep?.latitude ?? undefined,
+            longitude: rep?.longitude ?? undefined,
+            google_rating: sanitizedRating,
+            google_review_count: sanitizedCount ?? undefined,
+            google_maps_url: signal.url,
+            review_source: signal.source,
+            is_poisoned: false,
+          });
+        } else if (settled.status === "rejected") {
+          errorCount++;
+        } else {
+          missCount++;
+        }
+      }
+
+      if (i + batchSize < uncachedKeys.length) {
+        await new Promise((r) => setTimeout(r, 400 + Math.random() * 300));
+      }
+    }
+  }
+
+  const enrichedEvents = events.map((event) => {
+    const key = venueReviewKey(
+      event.venueName || event.title,
+      event.city,
+      event.state,
+      event.postalCode
+    );
+
+    const cachedReview = cached.get(key);
+    const freshReview = freshSignals.get(key);
+    const review = freshReview || cachedReview;
+
+    if (!review) return event;
+
+    const sanitizedRating = sanitizeReviewRating(review.rating);
+    const sanitizedCount = sanitizeReviewCount(review.reviewCount);
+
+    if (!sanitizedRating) return event;
+
+    return {
+      ...event,
+      rawSourcePayload: {
+        ...event.rawSourcePayload,
+        google_places_rating: sanitizedRating,
+        google_places_user_rating_count: sanitizedCount,
+        google_places_url: review.url,
+        google_review_signal_source:
+          "source" in review ? review.source : "scraped_google_maps",
+      },
+    };
+  });
+
+  return { events: enrichedEvents, hitCount, missCount, errorCount, poisonedCount };
+}
+
+function shouldScrapeGoogleReviews(event: EventResult): boolean {
+  if (event.status === "cancelled" || event.status === "ended") return false;
+
+  const eventType = (event.eventType || "").toLowerCase();
+  if (eventType === "party / nightlife" || eventType === "party_nightlife") {
+    const haystack = normalizeToken(
+      [
+        event.venueName,
+        event.title,
+        JSON.stringify(event.rawSourcePayload || {}),
+      ].join(" ")
+    );
+    if (isLikelyClubLikeNightlifeVenue(haystack)) return false;
+  }
+
+  return true;
+}
+
+function isLikelyClubLikeNightlifeVenue(haystack: string): boolean {
+  return NIGHTLIFE_BLOCK_SIGNALS.some((s) => haystack.includes(s));
+}
+
+function buildReviewLookup(event: EventResult): ReviewLookup | null {
+  const venueName = event.venueName || event.title;
+  if (!venueName) return null;
+
+  const existingRating = sanitizeReviewRating(
+    event.rawSourcePayload?.google_places_rating
+  );
+  if (existingRating) return null;
+
+  const queryParts = [
+    venueName,
+    event.addressLine1,
+    event.city,
+    event.state,
+    event.postalCode,
+  ].filter(Boolean) as string[];
+
+  if (queryParts.length === 0) return null;
+  const query = queryParts.join(" ");
+
+  const cacheKey = venueReviewKey(
+    venueName,
+    event.city,
+    event.state,
+    event.postalCode
+  );
+
+  const reviewURLs = buildGoogleReviewURLs(query);
+
+  return {
+    cacheKey,
+    venueName,
+    addressLine1: event.addressLine1,
+    city: event.city,
+    state: event.state,
+    postalCode: event.postalCode,
+    query,
+    reviewURLs,
+  };
+}
+
+function buildGoogleReviewURLs(query: string): string[] {
+  const urls: string[] = [];
+
+  const placeSearchParams = new URLSearchParams({
+    hl: "en",
+    gl: "us",
+    q: query + " reviews",
+  });
+  urls.push(
+    `https://www.google.com/search?${placeSearchParams.toString()}`
+  );
+
+  const mapSearchParams = new URLSearchParams({
+    tbm: "map",
+    authuser: "0",
+    hl: "en",
+    gl: "us",
+    q: query,
+  });
+  urls.push(`https://www.google.com/search?${mapSearchParams.toString()}`);
+
+  const encodedQuery = encodeURIComponent(query).replace(/%20/g, "+");
+  urls.push(
+    `https://www.google.com/maps/search/${encodedQuery}?hl=en&gl=us`
+  );
+
+  return urls;
+}
+
+export async function testScrapeVenue(venueName: string, city: string, state: string, postalCode?: string): Promise<{ rating: number | null; reviewCount: number | null; url: string; source: string } | null> {
+  const queryParts = [venueName, city, state, postalCode].filter(Boolean) as string[];
+  const query = queryParts.join(" ");
+  const cacheKey = "test::" + venueName;
+  const reviewURLs = buildGoogleReviewURLs(query);
+  const lookup: ReviewLookup = { cacheKey, venueName, city, state, postalCode, query, reviewURLs };
+  return scrapeGoogleReviewSignal(lookup);
+}
+
+async function fetchReviewSignal(
+  lookup: ReviewLookup,
+  _config: WorkerConfig
+): Promise<ReviewSignal | null> {
+  return scrapeGoogleReviewSignal(lookup);
+}
+
+function isBlockedGoogleResponse(html: string): boolean {
+  if (html.length < 3000) return true;
+  if (html.includes("unusual traffic") || html.includes("captcha")) return true;
+  if (html.includes("detected unusual traffic")) return true;
+  if (html.includes('<noscript>') && html.includes('enablejs')) return true;
+  if (html.includes('httpservice/retry/enablejs')) return true;
+  if (html.includes('sorry/index') && html.includes('unusual traffic')) return true;
+  const bodyMatch = html.match(/<body[^>]*>([\s\S]{0,500})<\/body>/i);
+  if (bodyMatch && bodyMatch[1] && bodyMatch[1].replace(/<[^>]*>/g, '').trim().length < 50) return true;
+  return false;
+}
+
+async function scrapeGoogleReviewSignal(
+  lookup: ReviewLookup
+): Promise<ReviewSignal | null> {
+  let htmlSignalResult: ReviewSignal | null = null;
+  let mapSignalResult: ReviewSignal | null = null;
+
+  const mapURLs = lookup.reviewURLs.filter((u) => u.includes("tbm=map"));
+  const htmlURLs = lookup.reviewURLs.filter((u) => !u.includes("tbm=map"));
+  const orderedURLs = [...mapURLs, ...htmlURLs];
+
+  for (const reviewURL of orderedURLs) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, 300 * attempt));
+        }
+
+        const response = await fetch(reviewURL, {
+          method: "GET",
+          headers: {
+            "User-Agent": DESKTOP_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            Referer: "https://www.google.com/",
+            DNT: "1",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+          },
+          signal: AbortSignal.timeout(18000),
+        });
+
+        if (!response.ok) continue;
+
+        const html = await response.text();
+
+        if (isBlockedGoogleResponse(html)) {
+          continue;
+        }
+
+        if (reviewURL.includes("tbm=map")) {
+          const sig = parseGoogleMapSearchSignal(html, lookup, reviewURL);
+          if (sig && (!mapSignalResult || (sig.reviewCount ?? 0) > (mapSignalResult.reviewCount ?? 0))) {
+            mapSignalResult = sig;
+          }
+          if (!sig) {
+            const fallbackHtml = parseGoogleHTMLReviewSignal(html, lookup, reviewURL);
+            if (fallbackHtml && (!htmlSignalResult || (fallbackHtml.reviewCount ?? 0) > (htmlSignalResult.reviewCount ?? 0))) {
+              htmlSignalResult = fallbackHtml;
+            }
+          }
+        } else {
+          const sig = parseGoogleHTMLReviewSignal(html, lookup, reviewURL);
+          if (sig && (!htmlSignalResult || (sig.reviewCount ?? 0) > (htmlSignalResult.reviewCount ?? 0))) {
+            htmlSignalResult = sig;
+          }
+        }
+
+        if (mapSignalResult) {
+          break;
+        }
+        if (htmlSignalResult && htmlSignalResult.reviewCount && htmlSignalResult.reviewCount >= STRONG_REVIEW_COUNT_THRESHOLD) {
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (mapSignalResult) {
+      break;
+    }
+    if (htmlSignalResult && htmlSignalResult.reviewCount && htmlSignalResult.reviewCount >= STRONG_REVIEW_COUNT_THRESHOLD) {
+      break;
+    }
+  }
+
+  return reconcileSignals(htmlSignalResult, mapSignalResult);
+}
+
+function reconcileSignals(
+  htmlSignal: ReviewSignal | null,
+  mapSignal: ReviewSignal | null
+): ReviewSignal | null {
+  if (!htmlSignal && !mapSignal) return null;
+
+  if (mapSignal && !htmlSignal) {
+    return mapSignal;
+  }
+
+  if (htmlSignal && !mapSignal) {
+    if ((htmlSignal.reviewCount ?? 0) >= MIN_REVIEW_COUNT_FOR_AGGREGATE_TRUST) {
+      return htmlSignal;
+    }
+    return null;
+  }
+
+  const html = htmlSignal!;
+  const map = mapSignal!;
+
+  const htmlCount = html.reviewCount ?? 0;
+  const mapCount = map.reviewCount ?? 0;
+
+  if (Math.abs(html.rating - map.rating) <= 0.3) {
+    const bestCount = Math.max(htmlCount, mapCount);
+    const bestURL = map.url.includes("/maps/place/") ? map.url
+      : html.url.includes("/maps/place/") ? html.url
+      : map.url;
+    const preferredRating = map.rating;
+    return {
+      rating: preferredRating,
+      reviewCount: bestCount || null,
+      url: bestURL,
+      source: "scraped_google_maps",
+    };
+  }
+
+  if (mapCount >= MIN_REVIEW_COUNT_FOR_AGGREGATE_TRUST && htmlCount >= STRONG_REVIEW_COUNT_THRESHOLD && htmlCount > mapCount * 2) {
+    return html;
+  }
+
+  return map;
+}
+
+function parseGoogleMapSearchSignal(
+  response: string,
+  lookup: ReviewLookup,
+  fallbackURL: string
+): ReviewSignal | null {
+  const trimmed = response.trimStart();
+  const jsonStart = trimmed.search(/[\[{]/);
+  const sanitized = jsonStart >= 0 ? trimmed.substring(jsonStart) : "";
+  if (!sanitized) return null;
+
+  let jsonObject: unknown;
+  try {
+    jsonObject = JSON.parse(sanitized);
+  } catch {
+    return null;
+  }
+
+  type MapCandidate = { rating: number; reviewCount: number | null; reviewURL: string; score: number };
+  const candidates: MapCandidate[] = [];
+
+  collectGoogleMapSearchCandidate(
+    jsonObject,
+    lookup,
+    fallbackURL,
+    (candidate) => {
+      candidates.push(candidate);
+    }
+  );
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return (b.reviewCount ?? 0) - (a.reviewCount ?? 0);
+  });
+
+  const best = candidates[0];
+  return {
+    rating: best.rating,
+    reviewCount: best.reviewCount,
+    url: sanitizedUserFacingReviewURL(best.reviewURL),
+    source: "scraped_google_maps" as const,
+  };
+}
+
+function collectGoogleMapSearchCandidate(
+  node: unknown,
+  lookup: ReviewLookup,
+  fallbackURL: string,
+  onCandidate: (candidate: {
+    rating: number;
+    reviewCount: number | null;
+    reviewURL: string;
+    score: number;
+  }) => void
+): void {
+  if (Array.isArray(node)) {
+    const directCandidate = buildGoogleMapSearchCandidate(
+      node,
+      lookup,
+      fallbackURL
+    );
+    if (directCandidate) {
+      onCandidate(directCandidate);
+    }
+
+    const placeCardCandidate = buildGoogleMapSearchPlaceCardCandidate(
+      node,
+      lookup,
+      fallbackURL
+    );
+    if (placeCardCandidate) {
+      onCandidate(placeCardCandidate);
+    }
+
+    for (const child of node) {
+      collectGoogleMapSearchCandidate(child, lookup, fallbackURL, onCandidate);
+    }
+  } else if (node && typeof node === "object" && !Array.isArray(node)) {
+    for (const value of Object.values(node as Record<string, unknown>)) {
+      collectGoogleMapSearchCandidate(value, lookup, fallbackURL, onCandidate);
+    }
+  }
+}
+
+function buildGoogleMapSearchCandidate(
+  array: unknown[],
+  lookup: ReviewLookup,
+  fallbackURL: string
+): {
+  rating: number;
+  reviewCount: number | null;
+  reviewURL: string;
+  score: number;
+} | null {
+  const ratingWithCount = extractMapSearchRatingWithCount(array);
+  if (ratingWithCount === null) return null;
+
+  const { rating, reviewCount } = ratingWithCount;
+  const reviewURL = extractMapSearchReviewURL(array, fallbackURL);
+  const candidateStrings = extractMapSearchStrings(array, 2);
+  const bestScore = bestGoogleMapCandidateScore(
+    lookup,
+    candidateStrings,
+    reviewURL
+  );
+
+  if (bestScore === 0) return null;
+  return { rating, reviewCount, reviewURL, score: bestScore };
+}
+
+function buildGoogleMapSearchPlaceCardCandidate(
+  array: unknown[],
+  lookup: ReviewLookup,
+  fallbackURL: string
+): {
+  rating: number;
+  reviewCount: number | null;
+  reviewURL: string;
+  score: number;
+} | null {
+  const title = typeof array[11] === "string" ? array[11] : null;
+  const ratingNode = Array.isArray(array[4]) ? array[4] : null;
+  const ratingWithCount = ratingNode
+    ? extractMapSearchRatingWithCount(ratingNode)
+    : null;
+  const rating =
+    ratingWithCount?.rating ??
+    (ratingNode ? extractLooseMapSearchRating(ratingNode) : null);
+
+  if (!title || rating === null) return null;
+
+  const reviewCount = ratingWithCount?.reviewCount ?? null;
+  const reviewURL = extractMapSearchPlaceCardReviewURL(array, fallbackURL);
+  const candidateStrings = [
+    title,
+    typeof array[18] === "string" ? array[18] : null,
+    ...(Array.isArray(array[13])
+      ? array[13].filter((value): value is string => typeof value === "string")
+      : []),
+  ].filter((value): value is string => typeof value === "string");
+
+  const bestScore = bestGoogleMapCandidateScore(
+    lookup,
+    candidateStrings,
+    reviewURL
+  );
+
+  if (bestScore === 0) return null;
+  return { rating, reviewCount, reviewURL, score: bestScore };
+}
+
+function bestGoogleMapCandidateScore(
+  lookup: ReviewLookup,
+  candidateStrings: string[],
+  reviewURL: string
+): number {
+  const normalizedVenueName = normalizeToken(lookup.venueName);
+  let bestScore = 0;
+
+  for (const candidateTitle of candidateStrings) {
+    if (candidateTitle.length > 180) continue;
+
+    const score = googleReviewIdentityScore(lookup, candidateTitle, reviewURL);
+    if (score === 0) continue;
+
+    const normalizedCandidate = normalizeToken(candidateTitle);
+    const exactBonus = normalizedCandidate === normalizedVenueName ? 4 : 0;
+    const partialBonus =
+      exactBonus === 0 &&
+      normalizedVenueName &&
+      (normalizedCandidate.includes(normalizedVenueName) ||
+        normalizedVenueName.includes(normalizedCandidate))
+        ? 1
+        : 0;
+    bestScore = Math.max(bestScore, score + exactBonus + partialBonus);
+  }
+
+  return bestScore;
+}
+
+function extractMapSearchRatingWithCount(
+  array: unknown[]
+): { rating: number; reviewCount: number | null } | null {
+  if (
+    array.length >= 8 &&
+    array.slice(0, 7).every((v) => v === null) &&
+    typeof array[7] === "number" &&
+    array[7] >= 1.0 &&
+    array[7] <= 5.0
+  ) {
+    const rating = array[7];
+    const reviewCount = findNearbyReviewCount(array, 7);
+    return { rating, reviewCount: (reviewCount !== null && reviewCount >= MIN_REVIEW_COUNT_FOR_AGGREGATE_TRUST) ? reviewCount : null };
+  }
+
+  if (
+    array.length >= 3 &&
+    typeof array[0] === "number" &&
+    array[0] >= 1.0 &&
+    array[0] <= 5.0 &&
+    typeof array[2] === "number" &&
+    array[2] > 0 &&
+    Number.isInteger(array[2])
+  ) {
+    const rating = array[0];
+    const count = array[2] as number;
+    if (count >= MIN_REVIEW_COUNT_FOR_AGGREGATE_TRUST) {
+      return { rating, reviewCount: count };
+    }
+    return null;
+  }
+
+  if (
+    array.length >= 4 &&
+    typeof array[0] === "string" &&
+    array[0].length <= 120 &&
+    typeof array[1] === "number" &&
+    array[1] >= 1.0 &&
+    array[1] <= 5.0 &&
+    typeof array[3] === "number" &&
+    Number.isInteger(array[3]) &&
+    (array[3] as number) >= MIN_REVIEW_COUNT_FOR_AGGREGATE_TRUST
+  ) {
+    return { rating: array[1], reviewCount: array[3] as number };
+  }
+
+  if (
+    array.length >= 3 &&
+    array[0] === null &&
+    typeof array[1] === "number" &&
+    array[1] >= 1.0 &&
+    array[1] <= 5.0 &&
+    typeof array[2] === "number" &&
+    Number.isInteger(array[2]) &&
+    (array[2] as number) >= MIN_REVIEW_COUNT_FOR_AGGREGATE_TRUST
+  ) {
+    return { rating: array[1], reviewCount: array[2] as number };
+  }
+
+  return null;
+}
+
+function extractLooseMapSearchRating(array: unknown[]): number | null {
+  if (
+    array.length >= 8 &&
+    array.slice(0, 7).every((v) => v === null) &&
+    typeof array[7] === "number" &&
+    array[7] >= 1.0 &&
+    array[7] <= 5.0
+  ) {
+    return array[7];
+  }
+
+  if (
+    array.length >= 3 &&
+    typeof array[0] === "number" &&
+    array[0] >= 1.0 &&
+    array[0] <= 5.0 &&
+    (Array.isArray(array[1]) || (typeof array[2] === "number" && array[2] > 0))
+  ) {
+    return array[0];
+  }
+
+  if (
+    array.length >= 4 &&
+    typeof array[0] === "string" &&
+    array[0].length <= 120 &&
+    typeof array[1] === "number" &&
+    array[1] >= 1.0 &&
+    array[1] <= 5.0
+  ) {
+    return array[1];
+  }
+
+  if (
+    array.length >= 3 &&
+    array[0] === null &&
+    typeof array[1] === "number" &&
+    array[1] >= 1.0 &&
+    array[1] <= 5.0
+  ) {
+    return array[1];
+  }
+
+  return null;
+}
+
+function findNearbyReviewCount(array: unknown[], ratingIndex: number): number | null {
+  for (let i = ratingIndex + 1; i < Math.min(array.length, ratingIndex + 4); i++) {
+    if (typeof array[i] === "number" && Number.isInteger(array[i]) && (array[i] as number) > 0) {
+      return array[i] as number;
+    }
+    if (typeof array[i] === "string") {
+      const match = (array[i] as string).match(/^([\d,]+)\s*(?:review|rating)/i);
+      if (match) {
+        const parsed = parseInt(match[1].replace(/,/g, ""), 10);
+        if (parsed > 0) return parsed;
+      }
+    }
+    if (Array.isArray(array[i])) {
+      for (const nested of array[i] as unknown[]) {
+        if (typeof nested === "number" && Number.isInteger(nested) && (nested as number) >= MIN_REVIEW_COUNT_FOR_JSON_TRUST) {
+          return nested as number;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function extractMapSearchReviewURL(
+  array: unknown[],
+  fallbackURL: string
+): string {
+  const candidates = extractMapSearchStrings(array, 3);
+  for (const candidate of candidates) {
+    if (
+      candidate.includes("/maps/place/") &&
+      !candidate.includes("/maps/preview/")
+    ) {
+      const abs = absoluteGoogleURL(candidate);
+      if (abs) return abs;
+    }
+  }
+  for (const candidate of candidates) {
+    if (
+      candidate.startsWith("https://maps.google.com") ||
+      candidate.startsWith("https://www.google.com/maps")
+    ) {
+      const lower = candidate.toLowerCase();
+      if (!lower.includes("tbm=map")) {
+        const abs = absoluteGoogleURL(candidate);
+        if (abs) return sanitizedUserFacingReviewURL(abs);
+      }
+    }
+  }
+  return sanitizedUserFacingReviewURL(fallbackURL);
+}
+
+function extractMapSearchPlaceCardReviewURL(
+  array: unknown[],
+  fallbackURL: string
+): string {
+  if (typeof array[42] === "string") {
+    return sanitizedUserFacingReviewURL(array[42]);
+  }
+  return extractMapSearchReviewURL(array, fallbackURL);
+}
+
+function extractMapSearchStrings(
+  node: unknown,
+  maxDepth: number,
+  depth = 0
+): string[] {
+  if (depth > maxDepth) return [];
+  if (typeof node === "string") return [node];
+  if (Array.isArray(node)) {
+    return node.flatMap((child) =>
+      extractMapSearchStrings(child, maxDepth, depth + 1)
+    );
+  }
+  if (node && typeof node === "object") {
+    return Object.values(node as Record<string, unknown>).flatMap((child) =>
+      extractMapSearchStrings(child, maxDepth, depth + 1)
+    );
+  }
+  return [];
+}
+
+function absoluteGoogleURL(raw: string): string | null {
+  try {
+    if (raw.startsWith("http")) return raw;
+    if (raw.startsWith("/")) return `https://www.google.com${raw}`;
+  } catch {}
+  return null;
+}
+
+function sanitizedUserFacingReviewURL(urlString: string): string {
+  const lower = urlString.toLowerCase();
+  if (lower.includes("/maps/preview/place/")) {
+    try {
+      const url = new URL(urlString);
+      const match = url.pathname.match(/\/maps\/preview\/place\/([^/]+)/i);
+      if (match?.[1]) {
+        const query = decodeURIComponent(match[1].replace(/\+/g, " "));
+        const mapURL = new URL("https://www.google.com/maps/search/");
+        mapURL.searchParams.set("api", "1");
+        mapURL.searchParams.set("query", query);
+        return mapURL.toString();
+      }
+    } catch {}
+  }
+  if (
+    lower.includes("tbm=map") ||
+    lower.includes("/maps/preview/") ||
+    (lower.includes("google.com/search?") && !lower.includes("reviews"))
+  ) {
+    try {
+      const url = new URL(urlString);
+      const query = url.searchParams.get("q");
+      if (query) {
+        const mapURL = new URL("https://www.google.com/maps/search/");
+        mapURL.searchParams.set("api", "1");
+        mapURL.searchParams.set("query", query);
+        return mapURL.toString();
+      }
+    } catch {}
+  }
+  return urlString;
+}
+
+const RATING_REGEX = new RegExp(
+  [
+    `aria-label="Rated ([0-9.]+) out of 5[,"]`,
+    `<span class="(?:UIHjI|MW4etd|Aq14fc|jANrlb|yi40Hd|e4rVHe|Fam1ne|fzTgPe|Y0A0hc|oqSTJd|KsR1A)[^"]*"[^>]*>([0-9.]+)</span>`,
+    `aria-label="([0-9.]+) stars? ?"`,
+    `<span aria-hidden="true">([0-9.]+)</span>\\s*<span class="(?:ceNzKf|UY7F9|EBe2gf|F9iS2e|LJEGhe)[^"]*"[^>]*`,
+    `class="[^"]*(?:rating|stars|review-score)[^"]*"[^>]*>\\s*([0-9.]+)`,
+    `data-rating="([0-9.]+)"`,
+    `itemprop="ratingValue"[^>]*content="([0-9.]+)"`,
+  ].join("|")
+);
+
+const REVIEW_COUNT_PATTERNS = [
+  />([0-9][0-9,\.KkMm]*) reviews</,
+  /([0-9][0-9,\.KkMm]*) Google reviews/,
+  /aria-label="([0-9][0-9,\.KkMm]*) reviews"/,
+  /class="(?:EBe2gf|UY7F9|RDApEe|jANrlb|F9iS2e|LJEGhe)[^"]*"[^>]*>([0-9][0-9,\.KkMm]*)</,
+  />([0-9][0-9,\.KkMm]*) review/,
+  /itemprop="reviewCount"[^>]*content="([0-9][0-9,\.KkMm]*)"/,
+  /data-review-count="([0-9][0-9,\.KkMm]*)"/,
+  /\(([0-9][0-9,\.KkMm]*)\)/,
+];
+
+const TITLE_PATTERNS = [
+  /<h1[^>]+class="[^"]*(?:DUwDvf|lfPIob|fontHeadlineLarge|LZF9ie)[^"]*"[^>]*>(.*?)<\/h1>/,
+  /<title>(.*?) - Google (?:Maps|Search)<\/title>/,
+  /<span class="(?:OSrXXb|SPZz6b|rHQ3hc|yoA8e)">(.*?)<\/span>/,
+  /<div class="(?:dbg0pd|rgnuSb|lMbq3e)">(.*?)<\/div>/,
+  /<div class="(?:qBF1Pd|NhRr3b)[^"]*"[^>]*>(.*?)<\/div>/,
+  /<h2[^>]+class="[^"]*(?:qrShPb|kno-ecr-pt)[^"]*"[^>]*>(.*?)<\/h2>/,
+  /data-attrid="title"[^>]*>(.*?)</,
+  /<span data-attrid="title"[^>]*>(.*?)<\/span>/,
+  /aria-label="[^"]*" data-pid="[^"]*"[^>]*>\s*<span[^>]*>(.*?)<\/span>/,
+];
+
+function parseGoogleHTMLReviewSignal(
+  html: string,
+  lookup: ReviewLookup,
+  reviewURL: string
+): ReviewSignal | null {
+  let bestSignal: {
+    signal: ReviewSignal;
+    score: number;
+    reviewCount: number;
+  } | null = null;
+
+  const matches = html.matchAll(new RegExp(RATING_REGEX, "g"));
+  for (const match of matches) {
+    const ratingText = [1, 2, 3, 4, 5, 6, 7]
+      .map((i) => match[i])
+      .find((v) => v !== undefined);
+    if (!ratingText) continue;
+
+    const rating = parseFloat(ratingText);
+    if (isNaN(rating) || rating < 1.0 || rating > 5.0) continue;
+
+    const matchIndex = match.index ?? 0;
+    const windowStart = Math.max(0, matchIndex - 900);
+    const windowEnd = Math.min(html.length, matchIndex + (match[0]?.length ?? 0) + 900);
+    const window = html.substring(windowStart, windowEnd);
+
+    let reviewCount: number | null = null;
+    for (const pattern of REVIEW_COUNT_PATTERNS) {
+      const countMatch = window.match(pattern);
+      if (countMatch?.[1]) {
+        reviewCount = parseGoogleReviewCount(countMatch[1]);
+        if (reviewCount !== null) break;
+      }
+    }
+
+    let title: string | null = null;
+    for (const pattern of TITLE_PATTERNS) {
+      const titleMatch = window.match(pattern) ?? html.match(pattern);
+      if (titleMatch?.[1]) {
+        title = decodeHTMLEntities(titleMatch[1]);
+        break;
+      }
+    }
+
+    const titleScore = googleReviewIdentityScore(lookup, title, reviewURL);
+    if (titleScore === 0) continue;
+
+    let reviewURLForSignal = sanitizedUserFacingReviewURL(reviewURL);
+
+    const placeURLMatch = window.match(/href="(https:\/\/(?:www\.)?google\.com\/maps\/place\/[^"]+)"/);
+    if (placeURLMatch?.[1]) {
+      reviewURLForSignal = placeURLMatch[1];
+    }
+
+    const signal: ReviewSignal = {
+      rating,
+      reviewCount,
+      url: reviewURLForSignal,
+      source: "scraped_google_maps",
+    };
+
+    const countBonus = reviewCount
+      ? reviewCount >= STRONG_REVIEW_COUNT_THRESHOLD ? 10
+      : reviewCount >= MIN_REVIEW_COUNT_FOR_AGGREGATE_TRUST ? 6
+      : reviewCount >= MIN_REVIEW_COUNT_FOR_JSON_TRUST ? 2
+      : 0
+      : 0;
+    const effectiveScore = titleScore + countBonus;
+    const reviewCountVal = reviewCount ?? 0;
+    if (
+      !bestSignal ||
+      effectiveScore > bestSignal.score ||
+      (effectiveScore === bestSignal.score && reviewCountVal > bestSignal.reviewCount)
+    ) {
+      bestSignal = { signal, score: effectiveScore, reviewCount: reviewCountVal };
+    }
+  }
+
+  if (!bestSignal) return null;
+  if ((bestSignal.reviewCount) < MIN_REVIEW_COUNT_FOR_JSON_TRUST) return null;
+  return bestSignal.signal;
+}
+
+function parseGoogleReviewCount(raw: string): number | null {
+  const normalized = raw
+    .replace(/,/g, "")
+    .replace(/\(/g, "")
+    .replace(/\)/g, "")
+    .trim()
+    .toUpperCase();
+
+  if (!normalized) return null;
+
+  if (normalized.endsWith("K")) {
+    const value = parseFloat(normalized.slice(0, -1));
+    if (!isNaN(value)) return Math.round(value * 1000);
+  }
+  if (normalized.endsWith("M")) {
+    const value = parseFloat(normalized.slice(0, -1));
+    if (!isNaN(value)) return Math.round(value * 1000000);
+  }
+  const parsed = parseInt(normalized, 10);
+  return isNaN(parsed) || parsed <= 0 ? null : parsed;
+}
+
+function decodeHTMLEntities(html: string): string {
+  return html
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#x2F;/g, "/")
+    .replace(/<[^>]*>/g, "")
+    .trim();
+}
+
+const VENUE_DESCRIPTOR_TOKENS = new Set([
+  "arena", "amphitheater", "amphitheatre", "auditorium",
+  "bar", "bistro", "bowl", "brewery",
+  "cafe", "center", "centre", "cinema", "club", "cocktail", "coliseum", "complex", "concert",
+  "dome", "entertainment", "events",
+  "field", "forum", "gallery", "garden", "gardens", "grill",
+  "hall", "hotel", "house", "inn", "kitchen",
+  "lanes", "live", "lounge", "museum", "music",
+  "night", "nightclub", "opera",
+  "palace", "park", "pavilion", "performing", "arts", "place", "plaza", "playhouse", "pub",
+  "resort", "restaurant", "room", "rooftop",
+  "saloon", "showroom", "space", "sports", "stadium", "stage", "steakhouse", "studio", "supperclub",
+  "taproom", "tavern", "theater", "theatre", "tower",
+  "venue", "village", "winery",
+]);
+
+const ARTICLE_TOKENS = new Set([
+  "a", "an", "the", "la", "le", "l", "el", "los", "las", "de", "del", "da", "di", "du",
+]);
+
+function googleReviewIdentityScore(
+  lookup: ReviewLookup,
+  candidateTitle: string | null | undefined,
+  reviewURL: string | null | undefined
+): number {
+  const normalizedAddress = normalizeToken(lookup.addressLine1 ?? "");
+  const normalizedCity = normalizeToken(lookup.city ?? "");
+  const normalizedState = normalizeStateToken(lookup.state ?? "");
+  const normalizedPostalCode = normalizePostalCode(lookup.postalCode);
+
+  const urlContext = googleReviewURLContext(reviewURL);
+  const candidateContext = normalizeToken(
+    [candidateTitle, urlContext.context].filter(Boolean).join(" ")
+  );
+
+  const addressMatch =
+    normalizedAddress.length > 0 && candidateContext.includes(normalizedAddress);
+  const localityMatch =
+    (normalizedPostalCode.length > 0 &&
+      candidateContext.includes(normalizedPostalCode)) ||
+    (normalizedCity.length > 0 &&
+      candidateContext.includes(normalizedCity) &&
+      (normalizedState.length === 0 ||
+        candidateContext.includes(normalizedState)));
+
+  const hasCandidateAddressDigits = candidateContext
+    .split(" ")
+    .some((w) => /\d/.test(w));
+
+  const candidateNames = new Set(
+    [normalizeToken(candidateTitle ?? ""), urlContext.primaryName].filter(
+      (v) => v.length > 0
+    )
+  );
+
+  if (candidateNames.size === 0) return 0;
+
+  const normalizedVenueName = normalizeToken(lookup.venueName);
+  if (!normalizedVenueName) return 0;
+
+  let bestScore = 0;
+  for (const candidateName of candidateNames) {
+    const score = venueIdentityScore(
+      normalizedVenueName,
+      candidateName,
+      addressMatch,
+      localityMatch,
+      hasCandidateAddressDigits,
+      normalizedAddress.length > 0
+    );
+    bestScore = Math.max(bestScore, score);
+  }
+
+  return bestScore;
+}
+
+function venueIdentityScore(
+  expectedVenueName: string,
+  candidateName: string,
+  addressMatch: boolean,
+  localityMatch: boolean,
+  hasCandidateAddressDigits: boolean,
+  hasExpectedAddress: boolean
+): number {
+  if (!expectedVenueName || !candidateName) return 0;
+
+  const normalizedExpected = stripPunctuation(expectedVenueName);
+  const normalizedCandidate = stripPunctuation(candidateName);
+
+  if (
+    normalizedExpected === normalizedCandidate ||
+    expectedVenueName === candidateName
+  ) {
+    if (hasExpectedAddress && hasCandidateAddressDigits && !addressMatch)
+      return 0;
+    if (addressMatch) return 14;
+    if (localityMatch) return 11;
+    return 8;
+  }
+
+  if (
+    normalizedExpected.includes(normalizedCandidate) ||
+    normalizedCandidate.includes(normalizedExpected)
+  ) {
+    const shorter = Math.min(
+      normalizedExpected.length,
+      normalizedCandidate.length
+    );
+    const longer = Math.max(
+      normalizedExpected.length,
+      normalizedCandidate.length
+    );
+    if (shorter > 4 && shorter / longer > 0.6) {
+      if (addressMatch) return 12;
+      if (localityMatch) return 9;
+      return 6;
+    }
+  }
+
+  const expectedTokens = identityTokens(expectedVenueName);
+  const candidateTokens = identityTokens(candidateName);
+  if (expectedTokens.size === 0 || candidateTokens.size === 0) return 0;
+
+  const sharedTokens = new Set(
+    [...expectedTokens].filter((t) => candidateTokens.has(t))
+  );
+  if (sharedTokens.size === 0) return 0;
+
+  if (
+    hasExpectedAddress &&
+    hasCandidateAddressDigits &&
+    !addressMatch &&
+    expectedTokens.size <= 2
+  )
+    return 0;
+
+  if (expectedTokens.size === 1) {
+    const token = [...expectedTokens][0];
+    if (!candidateTokens.has(token)) return 0;
+    const extras = new Set(
+      [...candidateTokens].filter((t) => t !== token)
+    );
+    if (extras.size === 0) {
+      if (addressMatch) return 13;
+      if (localityMatch) return 9;
+      return 5;
+    }
+    if ([...extras].every((t) => VENUE_DESCRIPTOR_TOKENS.has(t))) {
+      if (addressMatch) return 11;
+      if (localityMatch) return 7;
+      return 4;
+    }
+    return 0;
+  }
+
+  const allExpectedInCandidate = [...expectedTokens].every((t) =>
+    candidateTokens.has(t)
+  );
+
+  if (!allExpectedInCandidate) {
+    const coverage = sharedTokens.size / expectedTokens.size;
+    if (coverage >= 0.75 && expectedTokens.size >= 2) {
+      if (addressMatch) return 8;
+      if (localityMatch) return 6;
+      return 3;
+    }
+    if (
+      addressMatch &&
+      expectedTokens.size >= 3 &&
+      sharedTokens.size === expectedTokens.size - 1
+    )
+      return 7;
+    if (
+      localityMatch &&
+      expectedTokens.size >= 3 &&
+      sharedTokens.size === expectedTokens.size - 1
+    )
+      return 5;
+    return 0;
+  }
+
+  const extras = new Set(
+    [...candidateTokens].filter((t) => !expectedTokens.has(t))
+  );
+  if (extras.size === 0) {
+    if (addressMatch) return 13;
+    if (localityMatch) return 10;
+    return 6;
+  }
+  if ([...extras].every((t) => VENUE_DESCRIPTOR_TOKENS.has(t))) {
+    if (addressMatch) return 10;
+    if (localityMatch) return 7;
+    return 5;
+  }
+  const prefixedCandidate =
+    normalizedCandidate === normalizedExpected ||
+    normalizedCandidate.startsWith(`${normalizedExpected} `);
+  if (prefixedCandidate && addressMatch) return 10;
+  if (prefixedCandidate && localityMatch) return 7;
+  if (extras.size <= 2) {
+    if (addressMatch) return 8;
+    if (localityMatch) return 5;
+  }
+  return 0;
+}
+
+function stripPunctuation(value: string): string {
+  return value
+    .replace(/[^a-zA-Z0-9 ]/g, "")
+    .split(/\s+/)
+    .join(" ");
+}
+
+function identityTokens(normalizedValue: string): Set<string> {
+  const tokens = new Set(normalizedValue.split(/\s+/).filter((t) => t.length > 0));
+  for (const article of ARTICLE_TOKENS) {
+    tokens.delete(article);
+  }
+  return tokens;
+}
+
+function normalizePostalCode(value: string | null | undefined): string {
+  if (!value) return "";
+  const digits = value.replace(/\D/g, "");
+  return digits.length >= 5 ? digits.substring(0, 5) : digits;
+}
+
+function googleReviewURLContext(
+  reviewURL: string | null | undefined
+): { primaryName: string; context: string } {
+  if (!reviewURL?.trim()) return { primaryName: "", context: "" };
+
+  const fragments: string[] = [];
+  try {
+    const url = new URL(reviewURL);
+    const interestingParams = new Set([
+      "query",
+      "q",
+      "destination",
+      "daddr",
+      "place",
+    ]);
+    for (const [key, value] of url.searchParams) {
+      if (interestingParams.has(key.toLowerCase()) && value) {
+        fragments.push(decodeURIComponent(value.replace(/\+/g, " ")));
+      }
+    }
+
+    const pathComponents = url.pathname
+      .split("/")
+      .map((c) => decodeURIComponent(c.replace(/\+/g, " ")));
+    for (const marker of ["search", "place"]) {
+      const index = pathComponents.findIndex(
+        (c) => normalizeToken(c) === marker
+      );
+      if (index < 0) continue;
+      const tail = pathComponents
+        .slice(index + 1)
+        .filter((c) => {
+          const n = normalizeToken(c);
+          return n.length > 0 && n !== "data" && !n.startsWith("@");
+        })
+        .join(" ");
+      if (tail) fragments.push(tail);
+    }
+  } catch {}
+
+  if (fragments.length === 0) {
+    try {
+      fragments.push(decodeURIComponent(reviewURL));
+    } catch {
+      fragments.push(reviewURL);
+    }
+  }
+
+  const normalizedFragments = fragments
+    .map(normalizeToken)
+    .filter((f) => f.length > 0);
+
+  const primaryName =
+    normalizedFragments
+      .filter((f) => f.length <= 80)
+      .sort((a, b) => a.length - b.length)[0] ?? "";
+
+  return { primaryName, context: normalizedFragments.join(" ") };
+}
